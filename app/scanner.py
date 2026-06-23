@@ -139,7 +139,7 @@ async def _run_download(limit: int | None, client: TgUserClient | None = None) -
     _print_counts()
 
 
-def _run_embed(limit: int | None) -> None:
+def _run_embed(limit: int | None, keep_previews: bool = False) -> None:
     config.ensure_dirs()
     db.get_conn()
 
@@ -151,68 +151,49 @@ def _run_embed(limit: int | None) -> None:
         return
 
     from app.embeddings import Embedder
+    from app.preview import delete_previews
     from pathlib import Path
 
     embedder = Embedder()
-    batch_size = 32
+    print(f"Embedding {total} items …")
 
-    # Build a flat list of (media_id, frame_row) for batch encoding
-    pending: list[tuple[int, object]] = []
-    skip_ids: list[int] = []
-
+    done = 0
+    freed = 0
     for row in rows:
         media_id = row["id"]
         frames = db.list_frames_for_media(media_id)
         if not frames:
             db.mark_embed_failed(media_id, "no frames")
-            skip_ids.append(media_id)
-        else:
-            for frame in frames:
-                pending.append((media_id, frame))
+            continue
 
-    done = len(skip_ids)
-    print(f"Embedding {total - len(skip_ids)} items ({len(pending)} frames) …")
-
-    # Process in batches
-    for batch_start in range(0, len(pending), batch_size):
-        batch = pending[batch_start: batch_start + batch_size]
-        paths = []
-        valid = []
-        for media_id, frame in batch:
-            p = Path(frame["preview_path"])
-            if p.exists():
-                paths.append(p)
-                valid.append((media_id, frame))
-            else:
-                db.mark_embed_failed(media_id, f"Preview missing: {p.name}")
-
-        if not paths:
+        paths = [Path(f["preview_path"]) for f in frames]
+        if not all(p.exists() for p in paths):
+            db.mark_embed_failed(media_id, "preview frames missing (re-run preview stage)")
             continue
 
         try:
             vecs = embedder.embed_images(paths)
+            for frame, vec in zip(frames, vecs):
+                db.upsert_frame_embedding(
+                    frame_id=frame["id"],
+                    model_name=embedder.model_name,
+                    dim=len(vec),
+                    vector_bytes=vec.tobytes(),
+                )
+            db.mark_embed_ok(media_id)
+            if not keep_previews:
+                freed += delete_previews(media_id)
         except Exception as exc:
-            for media_id, _ in valid:
-                db.mark_embed_failed(media_id, str(exc)[:200])
-            print(f"  BATCH ERROR: {exc}")
+            db.mark_embed_failed(media_id, str(exc)[:200])
+            print(f"  ERROR {media_id}: {exc}")
             continue
 
-        media_frames: dict[int, list] = {}
-        for (media_id, frame), vec in zip(valid, vecs):
-            db.upsert_frame_embedding(
-                frame_id=frame["id"],
-                model_name=embedder.model_name,
-                dim=len(vec),
-                vector_bytes=vec.tobytes(),
-            )
-            media_frames.setdefault(media_id, []).append(True)
+        done += 1
+        if done % 50 == 0 or done == total:
+            print(f"  Embedded {done}/{total} …")
 
-        for media_id in media_frames:
-            db.mark_embed_ok(media_id)
-
-        done_in_batch = len(set(m for m, _ in valid))
-        done += done_in_batch
-        print(f"  Embedded {done}/{total} …")
+    if freed and not keep_previews:
+        print(f"  Freed {freed / 1024 / 1024:.1f} MB of preview frames.")
 
     _print_counts()
 

@@ -310,30 +310,78 @@ def upsert_frame_embedding(
     conn.commit()
 
 
-def reset_embed_status() -> int:
-    """Reset embed_status to 'pending' for all embedded items. Returns count."""
+def mark_items_for_model(model_name: str) -> int:
+    """
+    Find downloaded items that have NO embedding for `model_name` and mark them
+    pending for preview + embed (so a plain `sync` re-does only what's needed
+    when the model changes). Returns the number of items flagged.
+    """
     conn = get_conn()
-    cur = conn.execute(
-        "UPDATE media_items SET embed_status='pending', updated_at=CURRENT_TIMESTAMP "
-        "WHERE embed_status='ok'"
-    )
-    conn.execute(
-        "UPDATE media_items SET embed_status='pending', updated_at=CURRENT_TIMESTAMP "
-        "WHERE embed_status='failed'"
-    )
+    rows = conn.execute(
+        """
+        SELECT id FROM media_items
+        WHERE download_status='ok'
+          AND id NOT IN (
+            SELECT DISTINCT mf.media_id
+            FROM media_frames mf
+            JOIN frame_embeddings fe ON fe.frame_id = mf.id
+            WHERE fe.model_name = ?
+          )
+        """,
+        (model_name,),
+    ).fetchall()
+    ids = [r["id"] for r in rows]
+    for media_id in ids:
+        conn.execute(
+            "UPDATE media_items SET preview_status='pending', embed_status='pending', "
+            "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (media_id,),
+        )
     conn.commit()
-    return conn.execute("SELECT COUNT(*) FROM media_items WHERE embed_status='pending'").fetchone()[0]
+    return len(ids)
 
 
-def reset_preview_status() -> int:
-    """Reset preview_status and embed_status to 'pending'. Used for full reindex."""
+def force_reindex() -> int:
+    """
+    Full reindex: drop all frames (cascades embeddings) and reset preview/embed
+    status for every downloaded item. Used when FRAME_COUNT changes.
+    Returns the number of items reset.
+    """
     conn = get_conn()
+    conn.execute(
+        "DELETE FROM media_frames WHERE media_id IN "
+        "(SELECT id FROM media_items WHERE download_status='ok')"
+    )
     conn.execute(
         "UPDATE media_items SET preview_status='pending', embed_status='pending', "
-        "updated_at=CURRENT_TIMESTAMP WHERE download_status='ok'"
+        "last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE download_status='ok'"
     )
     conn.commit()
-    return conn.execute("SELECT COUNT(*) FROM media_items WHERE preview_status='pending'").fetchone()[0]
+    return conn.execute(
+        "SELECT COUNT(*) FROM media_items WHERE preview_status='pending'"
+    ).fetchone()[0]
+
+
+def count_embeddings_for_model(model_name: str) -> int:
+    return get_conn().execute(
+        "SELECT COUNT(*) FROM frame_embeddings WHERE model_name=?", (model_name,)
+    ).fetchone()[0]
+
+
+def list_prunable_media() -> list[sqlite3.Row]:
+    """Items whose bot_file_id is cached AND still have a local media file."""
+    return get_conn().execute(
+        "SELECT id, local_path FROM media_items "
+        "WHERE bot_cache_status='cached' AND local_path IS NOT NULL"
+    ).fetchall()
+
+
+def clear_local_path(media_id: int) -> None:
+    get_conn().execute(
+        "UPDATE media_items SET local_path=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (media_id,),
+    )
+    get_conn().commit()
 
 
 def list_pending_downloads(limit: int = 100) -> list[sqlite3.Row]:

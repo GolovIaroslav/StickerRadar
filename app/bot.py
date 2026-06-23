@@ -91,6 +91,10 @@ async def cmd_sync(message: Message, bot: Bot, tg_client) -> None:
 
         await _run_download(None, client=tg_client)
         c = db.get_status_counts()
+
+        # Flag items that lack embeddings for the active model (handles model change).
+        db.mark_items_for_model(config.MODEL_NAME)
+
         await update(
             f"Metadata: {c['total']} items\n"
             f"Downloaded: {c['downloaded']}\n"

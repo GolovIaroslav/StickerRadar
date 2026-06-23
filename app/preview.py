@@ -42,6 +42,17 @@ def _preview_dir(media_id: int) -> Path:
     return d
 
 
+def delete_previews(media_id: int) -> int:
+    """Delete the preview PNG directory for a media item. Returns bytes freed."""
+    import shutil
+    d = config.PREVIEWS_DIR / str(media_id)
+    if not d.exists():
+        return 0
+    freed = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+    shutil.rmtree(d, ignore_errors=True)
+    return freed
+
+
 def _composite(img: Image.Image) -> Image.Image:
     """Flatten transparency onto white background."""
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):

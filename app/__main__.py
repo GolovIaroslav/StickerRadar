@@ -76,12 +76,15 @@ def cmd_sync(args: argparse.Namespace) -> None:
     from app import config, db
     _apply_profile(args)
     config.ensure_dirs()
+    db.get_conn()
 
     if getattr(args, "frames", None):
         config.FRAME_COUNT = args.frames
 
     from app.scanner import _run_metadata_sync, _run_download, _run_preview, _run_embed
 
+    keep_previews = getattr(args, "keep_previews", False)
+    limit = getattr(args, "limit", None)
     run_all = not any([
         getattr(args, "metadata", False),
         getattr(args, "download", False),
@@ -89,24 +92,30 @@ def cmd_sync(args: argparse.Namespace) -> None:
         getattr(args, "embed", False),
     ])
 
-    if getattr(args, "full_reindex", False):
-        db.get_conn()
-        n = db.reset_preview_status()
-        print(f"Full reindex: reset {n} items to re-preview and re-embed.")
-    elif getattr(args, "reindex", False):
-        db.get_conn()
-        n = db.reset_embed_status()
-        print(f"Reindex: reset {n} items to re-embed.")
+    if getattr(args, "reindex", False):
+        n = db.force_reindex()
+        print(f"Reindex: reset {n} items to re-preview and re-embed.")
 
     try:
         if run_all or getattr(args, "metadata", False):
-            asyncio.run(_run_metadata_sync(getattr(args, "limit", None)))
+            asyncio.run(_run_metadata_sync(limit))
         if run_all or getattr(args, "download", False):
-            asyncio.run(_run_download(getattr(args, "limit", None)))
+            asyncio.run(_run_download(limit))
+
+        # Model-aware: flag downloaded items that lack embeddings for the active
+        # model so a plain `sync` re-does only what's needed after a model change.
+        if run_all:
+            flagged = db.mark_items_for_model(config.MODEL_NAME)
+            if flagged:
+                print(f"{flagged} item(s) need embeddings for model '{config.MODEL_NAME}'.")
+
         if run_all or getattr(args, "preview", False):
-            _run_preview(getattr(args, "limit", None))
+            _run_preview(limit)
         if run_all or getattr(args, "embed", False):
-            _run_embed(getattr(args, "limit", None))
+            _run_embed(limit, keep_previews=keep_previews)
+
+        if run_all:
+            _print_stats(config, db, getattr(args, "profile", None) or _read_active_profile())
     finally:
         db.close()
 
@@ -126,25 +135,22 @@ def cmd_status(args: argparse.Namespace) -> None:
     db.close()
 
 
-def cmd_stats(args: argparse.Namespace) -> None:
-    from app import config, db
+def _fmt_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def _dir_size(p: Path) -> int:
+    if not p.exists():
+        return 0
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+
+
+def _print_stats(config, db, profile: str) -> None:
     import os
-    _apply_profile(args)
-    db.get_conn()
-    profile = getattr(args, "profile", None) or _read_active_profile()
-
-    def _dir_size(p: Path) -> int:
-        if not p.exists():
-            return 0
-        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-
-    def _fmt(n: float) -> str:
-        for unit in ("B", "KB", "MB", "GB"):
-            if n < 1024:
-                return f"{n:.1f} {unit}"
-            n /= 1024
-        return f"{n:.1f} TB"
-
     media = _dir_size(config.MEDIA_DIR)
     previews = _dir_size(config.PREVIEWS_DIR)
     db_size = config.DB_PATH.stat().st_size if config.DB_PATH.exists() else 0
@@ -154,11 +160,11 @@ def cmd_stats(args: argparse.Namespace) -> None:
 
     counts = db.get_status_counts()
     print(f"\n── Stats ({profile}) ─────────────────────────────")
-    print(f"  Media (downloads)  : {_fmt(media)}")
-    print(f"  Preview frames     : {_fmt(previews)}")
-    print(f"  Database           : {_fmt(db_size)}")
-    print(f"  HF model cache     : {_fmt(model_cache)}")
-    print(f"  Total on disk      : {_fmt(media + previews + db_size)}")
+    print(f"  Media (downloads)  : {_fmt_bytes(media)}")
+    print(f"  Preview frames     : {_fmt_bytes(previews)}")
+    print(f"  Database           : {_fmt_bytes(db_size)}")
+    print(f"  Model cache (all)  : {_fmt_bytes(model_cache)}")
+    print(f"  Total on disk      : {_fmt_bytes(media + previews + db_size)}")
     print()
     print(f"  Total items        : {counts['total']}")
     print(f"  Downloaded         : {counts['downloaded']}")
@@ -166,10 +172,10 @@ def cmd_stats(args: argparse.Namespace) -> None:
     print(f"  Embedded           : {counts['embedded']}")
     print(f"  Failed             : {counts['failed']}")
     print(f"  Active model       : {config.MODEL_NAME}")
+    print(f"  Vectors (model)    : {db.count_embeddings_for_model(config.MODEL_NAME)}")
     print("─────────────────────────────────────────────────")
 
-    conn = db.get_conn()
-    errors = conn.execute(
+    errors = db.get_conn().execute(
         "SELECT last_error, COUNT(*) n FROM media_items "
         "WHERE last_error IS NOT NULL GROUP BY last_error ORDER BY n DESC LIMIT 5"
     ).fetchall()
@@ -178,38 +184,77 @@ def cmd_stats(args: argparse.Namespace) -> None:
         for row in errors:
             print(f"  ({row[1]}×) {(row[0] or '')[:90]}")
     print()
+
+
+def cmd_stats(args: argparse.Namespace) -> None:
+    from app import config, db
+    _apply_profile(args)
+    db.get_conn()
+    profile = getattr(args, "profile", None) or _read_active_profile()
+    _print_stats(config, db, profile)
+    db.close()
+
+
+def cmd_prune(args: argparse.Namespace) -> None:
+    """Delete local media files for stickers that already have a cached bot file_id."""
+    from app import config, db
+    _apply_profile(args)
+    db.get_conn()
+
+    rows = db.list_prunable_media()
+    if not rows:
+        print("Nothing to prune. (Media is removed only after a sticker has been")
+        print("sent at least once, so its Telegram file_id is cached.)")
+        db.close()
+        return
+
+    freed = 0
+    count = 0
+    for row in rows:
+        p = Path(row["local_path"])
+        if p.exists():
+            freed += p.stat().st_size
+            try:
+                p.unlink()
+                count += 1
+            except Exception:
+                continue
+        db.clear_local_path(row["id"])
+
+    print(f"Pruned {count} media file(s), freed {_fmt_bytes(freed)}.")
+    print("These stickers can still be sent via their cached Telegram file_id.")
     db.close()
 
 
 def cmd_models(_args: argparse.Namespace) -> None:
-    from app.models import REGISTRY
+    from app.models import REGISTRY, INCOMPATIBLE, fmt_size
     from app import config
 
     active = config.MODEL_NAME
     print("\nAvailable embedding models")
-    print("─" * 78)
-    print(f"  {'MODEL KEY':<46} {'QUALITY':<6} {'SIZE':<10} LANGS")
-    print("─" * 78)
+    print("─" * 86)
+    print(f"  {'MODEL KEY':<40} {'QUALITY':<6} {'SIZE':<9} LANGS")
+    print("─" * 86)
     for m in REGISTRY:
         marker = "  ← active" if m.key == active else ""
         exp = " [experimental]" if m.experimental else ""
-        print(f"  {m.key:<46} {m.quality:<6} {m.size_hint:<10} {m.langs_note}{marker}{exp}")
+        print(f"  {m.key:<40} {m.quality:<6} {fmt_size(m.size_mb):<9} {m.langs_note}{marker}{exp}")
     print()
     print("To switch model:")
-    print("  1. Set MODEL_NAME=<key> in .env")
+    print("  1. Set MODEL_NAME=<key> in .env  (install any extra deps shown below)")
     print("  2. Run: python -m app sync --reindex")
     print()
-    print("Custom model (CLIP-compatible, not in registry):")
-    print("  Set MODEL_NAME=<text-model> and IMAGE_MODEL_NAME=<image-model> in .env")
-    print("  Both models MUST share the same embedding space (CLIP-style).")
+    print("Custom CLIP-compatible model not in this list:")
+    print("  Set MODEL_NAME=<id> in .env (loaded via sentence-transformers).")
     print()
-    print("⚠  Text-only models (Gemini Embedding, Qwen3-text, etc.) are NOT compatible —")
-    print("   they cannot encode sticker images.")
+    print("⚠  NOT compatible (cannot encode sticker images):")
+    for name, why in INCOMPATIBLE:
+        print(f"     • {name} — {why}")
     print()
     for m in REGISTRY:
         if m.notes:
             label = m.key.split("/")[-1]
-            print(f"[{label}]")
+            print(f"[{label}]  ({fmt_size(m.size_mb)})")
             for line in m.notes.splitlines():
                 print(f"  {line}")
             print()
@@ -337,9 +382,9 @@ def main() -> None:
     p.add_argument("--preview", action="store_true", help="Preview stage only")
     p.add_argument("--embed", action="store_true", help="Embed stage only")
     p.add_argument("--reindex", action="store_true",
-                   help="Re-embed all items (after changing MODEL_NAME)")
-    p.add_argument("--full-reindex", action="store_true", dest="full_reindex",
-                   help="Re-extract previews AND re-embed (after changing FRAME_COUNT)")
+                   help="Re-extract previews and re-embed everything (after changing FRAME_COUNT)")
+    p.add_argument("--keep-previews", action="store_true", dest="keep_previews",
+                   help="Do not auto-delete preview frames after embedding")
     p.add_argument("--frames", type=int, default=None, metavar="N",
                    help="Override FRAME_COUNT for this run")
     p.add_argument("--limit", type=int, default=None, metavar="N",
@@ -348,6 +393,9 @@ def main() -> None:
     # status / stats
     sub.add_parser("status", help="Show pipeline status counts")
     sub.add_parser("stats", help="Show disk usage and index details")
+
+    # prune
+    sub.add_parser("prune", help="Delete local media for stickers already sent once (frees disk)")
 
     # models
     sub.add_parser("models", help="List available embedding models and upgrade instructions")
@@ -375,6 +423,7 @@ def main() -> None:
         "sync": cmd_sync,
         "status": cmd_status,
         "stats": cmd_stats,
+        "prune": cmd_prune,
         "models": cmd_models,
         "session": cmd_session,
         "search": cmd_search,

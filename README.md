@@ -60,9 +60,27 @@ uv add rlottie-python   # primary renderer
 
 ---
 
-## Quick start
+## Quick start (5 steps)
 
-### 1. Get credentials
+```bash
+# 1. Get credentials (see table below) and configure
+cp .env.example .env          # then edit .env
+
+# 2. Log in to Telegram (QR recommended)
+python -m app login
+
+# 3. Build the index (downloads stickers, embeds them)
+python -m app sync
+
+# 4. Start the bot
+python -m app run
+
+# 5. Open your bot in Telegram and type any phrase
+```
+
+That's it. After the first setup you only ever need `python -m app run`, and `/sync` from inside the bot to pick up new stickers.
+
+### Credentials
 
 | Credential | Where to get |
 |---|---|
@@ -70,33 +88,16 @@ uv add rlottie-python   # primary renderer
 | `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) — create a bot |
 | `OWNER_USER_ID` | [@userinfobot](https://t.me/userinfobot) or [@getidsbot](https://t.me/getidsbot) |
 
-### 2. Configure
+Put all four into `.env`.
 
-```bash
-cp .env.example .env
-# Edit .env: fill in TG_API_ID, TG_API_HASH, BOT_TOKEN, OWNER_USER_ID
-```
+### Logging in
 
-### 3. Log in
+`python -m app login` asks you to choose:
 
-```bash
-python -m app login
-```
+- **QR code (recommended):** Open Telegram on your phone → Settings → Devices → Link Desktop Device → scan the QR in the terminal. The QR auto-refreshes.
+- **Phone number:** The code arrives as a message from the official *Telegram* account (user 777000) **inside the Telegram app — not as SMS**. If it never arrives, use QR login instead.
 
-You'll be asked to choose between **QR code** (recommended) or **phone number**.
-
-**QR code login:** Open Telegram on your phone → Settings → Devices → Link Desktop Device → scan the QR that appears in the terminal.
-
-**Phone code login:** Enter your number. The code arrives as a message from the official *Telegram* account (user 777000) in your Telegram app — not as SMS. If it doesn't arrive, use QR login instead.
-
-### 4. Sync and start
-
-```bash
-python -m app sync    # downloads stickers, extracts previews, builds embeddings
-python -m app run     # starts the bot
-```
-
-Then open your bot in Telegram and send any text. Or use `/sync` from the bot to trigger a full sync without touching the terminal.
+If you have 2FA enabled, you'll be asked for your password.
 
 ---
 
@@ -114,11 +115,12 @@ python -m app <command> [--profile NAME]
 | `sync --download` | Download stage only |
 | `sync --preview` | Preview extraction only |
 | `sync --embed` | Embedding stage only |
-| `sync --reindex` | Re-embed all items (after changing model) |
-| `sync --full-reindex` | Re-extract previews and re-embed (after changing `FRAME_COUNT`) |
+| `sync --reindex` | Re-extract previews and re-embed everything (after changing `FRAME_COUNT`) |
 | `sync --frames N` | Override frame count for this run |
+| `sync --keep-previews` | Don't auto-delete preview frames after embedding |
 | `status` | Show pipeline status counts |
 | `stats` | Show disk usage, model cache size, failure reasons |
+| `prune` | Delete local media for stickers already sent once (frees disk) |
 | `models` | List available embedding models and upgrade instructions |
 | `session list` | Show all saved profiles |
 | `session use <name>` | Switch active profile |
@@ -149,11 +151,12 @@ Re-running `sync` is safe and efficient. The pipeline only processes items that 
 - Removed a pack from Telegram? The local copy stays (use `stats` to track disk usage).
 - Existing items with `download_status=ok` are never re-downloaded.
 
-To force a full rebuild (e.g. after changing the model or frame count):
+**Changing the model is automatic:** if you switch `MODEL_NAME` and run `sync`, StickerRadar detects that existing items have no vectors for the new model and re-embeds them (using the kept media — no re-download). Unchanged model → only genuinely new items are processed.
+
+To force a full rebuild after changing `FRAME_COUNT` (frame structure changes):
 
 ```bash
-python -m app sync --reindex          # re-embed only
-python -m app sync --full-reindex     # re-extract previews + re-embed
+python -m app sync --reindex
 ```
 
 ---
@@ -163,26 +166,31 @@ python -m app sync --full-reindex     # re-extract previews + re-embed
 StickerRadar uses **CLIP-style multimodal models** that encode both images and text into the same vector space. Text-only models (Gemini Embedding, Qwen3-text, etc.) are not compatible — they cannot encode sticker images.
 
 ```bash
-python -m app models    # list all options with install instructions
+python -m app models    # list all options + per-model install instructions
 ```
 
 | Model | Quality | Size | Languages |
 |---|---|---|---|
-| `sentence-transformers/clip-ViT-B-32-multilingual-v1` | fast | ~380 MB | 50+ |
-| `jinaai/jina-clip-v2` | **best** | ~3.5 GB | 89 (incl. Russian, Chinese) |
-| `openai/clip-vit-large-patch14` | good | ~900 MB | English only |
+| `google/siglip2-base-patch16-224` *(default)* | good | ~0.4 GB | multilingual (RU, ZH, 100+) |
+| `google/siglip2-large-patch16-256` | best | ~1.5 GB | multilingual |
+| `jinaai/jina-clip-v2` | best | ~3.5 GB | 89 (incl. RU, ZH) |
+| `openai/clip-vit-large-patch14` | good | ~1.7 GB | English only |
+| `apple/MobileCLIP2-S2` *(experimental)* | fast | ~0.2 GB | English-leaning |
+| `jinaai/jina-embeddings-v4` *(experimental)* | best | ~7.5 GB | multilingual |
+| `Qwen/Qwen3-VL-Embedding-2B` *(experimental)* | best | ~4.5 GB | multilingual |
 
-**Default** (`clip-ViT-B-32-multilingual-v1`) is a 2021 ViT-B/32 model — fast and lightweight, adequate for testing. For better quality, upgrade to `jina-clip-v2`:
+**Default** is Google SigLIP2 (2025) — modern, multilingual, small. To upgrade quality:
 
 ```bash
-uv add 'transformers>=4.36' einops
 # In .env:
 MODEL_NAME=jinaai/jina-clip-v2
-# Re-embed:
+uv add einops          # this model needs einops
 python -m app sync --reindex
 ```
 
-**Custom model:** set `MODEL_NAME` (text encoder) and `IMAGE_MODEL_NAME` (image encoder) in `.env`. Both must share the same embedding space.
+**Not compatible:** text-only embedders (Gemini Embedding, Qwen3 *text* embedding, OpenAI text-embedding-3, BGE, E5) cannot encode sticker images, so they cannot be used for this kind of image search.
+
+**Custom model:** set `MODEL_NAME` in `.env` to any CLIP-style model on Hugging Face (loaded via sentence-transformers).
 
 ---
 
@@ -208,7 +216,17 @@ The active profile is stored in `data/.active_profile`.
 python -m app stats
 ```
 
-Shows: media downloads, preview frames, database, HF model cache, total. Downloaded files are kept locally — they are needed for the first bot send (Telegram requires an upload to mint a `file_id`; subsequent sends reuse the cached ID).
+Shows: media downloads, preview frames, database, model cache, total, and top failure reasons.
+
+**Automatic cleanup:** preview frames (`data/previews/`) are deleted automatically after each item is embedded — they're disposable intermediates and often larger than the original stickers. Use `sync --keep-previews` to keep them.
+
+**Downloaded media is kept** because it's needed for the *first* send of each sticker: Telegram only returns a reusable `file_id` after you upload the file once. Once a sticker has been sent (its `file_id` is cached), its local copy is no longer needed:
+
+```bash
+python -m app prune    # delete media for already-sent stickers
+```
+
+Pruned stickers still send instantly via their cached `file_id`. (If you later switch models, pruned items can't be re-embedded without their media — re-run `sync --download` first.)
 
 ---
 

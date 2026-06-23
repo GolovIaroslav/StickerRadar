@@ -116,12 +116,19 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
         list(media_best.keys()),
     ).fetchall()
 
+    # Normalize raw cosine scores to [0, 1] across candidates so the additive
+    # metadata boosts below are meaningful regardless of the model's score scale
+    # (SigLIP image-text cosines are much smaller than CLIP's, for example).
+    raw_vals = list(media_best.values())
+    lo = min(raw_vals)
+    span = (max(raw_vals) - lo) or 1.0
+
     # Apply metadata boosts
     results: list[SearchResult] = []
     query_lower = query.lower()
 
     for row in rows:
-        score = media_best[row["id"]]
+        score = (media_best[row["id"]] - lo) / span
 
         if row["is_favorite"]:
             score += 0.030
