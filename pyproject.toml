@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[project]
+name = "stickerradar"
+version = "0.1.0"
+description = "Local semantic search for your Telegram stickers and saved GIFs"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+keywords = ["telegram", "stickers", "search", "semantic", "clip", "vector"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "telethon>=1.36",
+    "aiogram>=3.13",
+    "sentence-transformers>=3.0",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+    "python-dotenv>=1.0",
+    "aiofiles>=23.0",
+]
+
+[project.optional-dependencies]
+# TGS (animated sticker) rendering — primary method
+tgs = ["rlottie-python>=0.3"]
+# TGS fallback renderer
+lottie = ["lottie>=0.7"]
+# Development tools
+dev = ["ruff>=0.4", "pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+stickerradar = "app.main:cli_main"
+
+[project.urls]
+Repository = "https://github.com/golov-j/StickerRadar"
+"Bug Tracker" = "https://github.com/golov-j/StickerRadar/issues"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

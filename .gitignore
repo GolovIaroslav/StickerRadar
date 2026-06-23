@@ -1,0 +1,61 @@
+# ============================================================
+# StickerRadar — .gitignore
+# ============================================================
+
+# --- Secrets and sensitive data (NEVER commit these) ---
+.env
+*.session
+*.session-journal
+data/
+
+# --- Agent/AI working files (local only) ---
+memory.md
+todo.md
+decisions.md
+MEMORY.md
+.claude/
+.aider/
+.cursor/
+.copilot/
+*.agent.md
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.env.local
+pip-wheel-metadata/
+*.whl
+
+# --- Testing and coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# --- OS artifacts ---
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.swp
+*.swo
+.idea/
+.vscode/settings.json
+
+# --- Logs ---
+*.log
+logs/
