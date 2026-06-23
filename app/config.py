@@ -62,6 +62,10 @@ OWNER_USER_ID: int = int(_require("OWNER_USER_ID"))
 # Override image model separately (only needed for custom dual-model setups)
 IMAGE_MODEL_NAME: str = _str("IMAGE_MODEL_NAME", "")
 
+# Compute device for embeddings: "auto" | "cpu" | "cuda"
+# "auto" uses the GPU if available, else CPU (with automatic CPU fallback on OOM).
+DEVICE: str = _str("DEVICE", "auto")
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------

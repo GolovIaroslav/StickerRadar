@@ -42,12 +42,12 @@ REGISTRY: list[ModelEntry] = [
         quality="best",
         langs="33 languages incl. Russian & Chinese; multimodal (text/image/video)",
         trust_remote_code=True,
-        experimental=True,
+        verified=True,
         notes=(
             "Default. Strongest open-license (Apache-2.0) option. Multimodal, 33 languages.\n"
-            "Needs:  uv add 'transformers>=4.57' accelerate qwen-vl-utils\n"
-            "UNVERIFIED loader in this build — if `sync` fails to load it, switch to the\n"
-            "tested fallback:  MODEL_NAME=google/siglip2-base-patch16-224"
+            "Loads via sentence-transformers; needs torchvision (already a dependency).\n"
+            "Heavy: ~2B params. Does NOT fit small GPUs (<8 GB) — runs on CPU automatically.\n"
+            "On a small/busy GPU set  DEVICE=cpu  in .env (slower but works; uses RAM)."
         ),
     ),
     ModelEntry(

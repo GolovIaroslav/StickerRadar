@@ -28,6 +28,18 @@ def _l2(arr: np.ndarray) -> np.ndarray:
     return (arr / norm).astype(np.float32)
 
 
+def _resolve_device(pref: str | None) -> str:
+    pref = (pref or "auto").lower()
+    if pref in ("cpu", "cuda"):
+        return pref
+    import torch
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _is_oom(exc: Exception) -> bool:
+    return "out of memory" in str(exc).lower() or "CUDA out of memory" in str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Backends
 # ---------------------------------------------------------------------------
@@ -35,12 +47,12 @@ def _l2(arr: np.ndarray) -> np.ndarray:
 class _HFBackend:
     """transformers AutoModel backend (SigLIP2, CLIP)."""
 
-    def __init__(self, model_id: str, text_padding: str, trust_remote_code: bool) -> None:
+    def __init__(self, model_id: str, text_padding: str, trust_remote_code: bool, device: str) -> None:
         import torch
         from transformers import AutoModel, AutoProcessor
 
         self.torch = torch
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
         print(f"Loading model: {model_id}  (transformers, device={self.device})")
         self.model = AutoModel.from_pretrained(
             model_id, trust_remote_code=trust_remote_code
@@ -85,16 +97,18 @@ class _HFBackend:
 class _STBackend:
     """sentence-transformers backend (jina-clip-v2, packaged CLIP)."""
 
-    def __init__(self, text_model: str, image_model: str, trust_remote_code: bool) -> None:
+    def __init__(self, text_model: str, image_model: str, trust_remote_code: bool, device: str) -> None:
         from sentence_transformers import SentenceTransformer
 
-        kw = {"trust_remote_code": trust_remote_code} if trust_remote_code else {}
-        print(f"Loading text model: {text_model}  (sentence-transformers)")
+        kw = {"device": device}
+        if trust_remote_code:
+            kw["trust_remote_code"] = True
+        print(f"Loading text model: {text_model}  (sentence-transformers, device={device})")
         self.text = SentenceTransformer(text_model, **kw)
         if image_model == text_model:
             self.img = self.text
         else:
-            print(f"Loading image model: {image_model}  (sentence-transformers)")
+            print(f"Loading image model: {image_model}  (sentence-transformers, device={device})")
             self.img = SentenceTransformer(image_model, **kw)
 
     def encode_images(self, images: list[Image.Image]) -> np.ndarray:
@@ -114,7 +128,7 @@ class _STBackend:
 class _OpenClipBackend:
     """open_clip backend (MobileCLIP). Experimental."""
 
-    def __init__(self, model_id: str) -> None:
+    def __init__(self, model_id: str, device: str) -> None:
         try:
             import open_clip
         except ImportError:
@@ -126,7 +140,7 @@ class _OpenClipBackend:
 
         self.torch = torch
         self.open_clip = open_clip
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
         name = model_id.split("/")[-1]
         print(f"Loading model: {model_id}  (open_clip, device={self.device})")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
@@ -162,27 +176,41 @@ class Embedder:
     def model_name(self) -> str:
         return config.MODEL_NAME
 
+    def _build(self, device: str):
+        from app.models import get as registry_get
+        entry = registry_get(config.MODEL_NAME)
+
+        if entry is None:
+            # Custom model not in registry — a Hugging Face id OR a local path.
+            # Loaded via sentence-transformers; must be CLIP-style (image + text).
+            image_model = config.IMAGE_MODEL_NAME or config.MODEL_NAME
+            return _STBackend(config.MODEL_NAME, image_model, True, device)
+        if entry.loader == "hf":
+            return _HFBackend(entry.key, entry.text_padding, entry.trust_remote_code, device)
+        if entry.loader == "open_clip":
+            return _OpenClipBackend(entry.key, device)
+        image_model = config.IMAGE_MODEL_NAME or entry.key
+        return _STBackend(entry.key, image_model, entry.trust_remote_code, device)
+
     def _get(self):
         if self._backend is not None:
             return self._backend
 
-        from app.models import get as registry_get
-        entry = registry_get(config.MODEL_NAME)
-
+        device = _resolve_device(config.DEVICE)
         try:
-            if entry is None:
-                # Custom model not in registry — a Hugging Face id OR a local path.
-                # Loaded via sentence-transformers; must be CLIP-style (image + text).
-                image_model = config.IMAGE_MODEL_NAME or config.MODEL_NAME
-                self._backend = _STBackend(config.MODEL_NAME, image_model, trust_remote_code=True)
-            elif entry.loader == "hf":
-                self._backend = _HFBackend(entry.key, entry.text_padding, entry.trust_remote_code)
-            elif entry.loader == "open_clip":
-                self._backend = _OpenClipBackend(entry.key)
-            else:  # "st"
-                image_model = config.IMAGE_MODEL_NAME or entry.key
-                self._backend = _STBackend(entry.key, image_model, entry.trust_remote_code)
+            self._backend = self._build(device)
         except Exception as exc:
+            # Out of GPU memory → automatically retry on CPU.
+            if device == "cuda" and _is_oom(exc):
+                print("GPU out of memory — falling back to CPU (slower). "
+                      "Set DEVICE=cpu in .env to skip this attempt next time.")
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                self._backend = self._build("cpu")
+                return self._backend
             raise RuntimeError(
                 f"Failed to load embedding model '{config.MODEL_NAME}':\n  {exc}\n\n"
                 "It may need extra dependencies or a custom loader. Run `python -m app models`\n"

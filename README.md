@@ -57,9 +57,12 @@ Everything runs on your machine. No data leaves except standard Telegram API cal
 Runs on **Linux, macOS, and Windows**. On Windows, use PowerShell or Windows
 Terminal (for clean QR rendering) and make sure `ffmpeg` is on your `PATH`.
 
-A GPU is **optional but recommended for the larger models**: if you install a
-CUDA build of PyTorch, embedding runs on the GPU automatically. On CPU the small
-`siglip2-base` model is fine; the 2B+ models are slow on CPU.
+**GPU vs CPU:** embedding runs on the GPU automatically if a CUDA PyTorch is
+installed. The 2B default model needs **~8 GB VRAM** — on a smaller or busy GPU
+it automatically falls back to CPU (uses system RAM, slower but reliable). You
+can force it with `DEVICE=cpu` (or `DEVICE=cuda`) in `.env`. For GPUs under 8 GB,
+either use `DEVICE=cpu` with the default, or switch to the small
+`google/siglip2-base-patch16-224` model which fits easily.
 
 ---
 
