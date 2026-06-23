@@ -8,28 +8,27 @@ own private bot. Type *"tired cat"* and get the cat stickers — even if you hav
 4,000 stickers across hundreds of packs and never tagged a single one.
 
 ```
-You → bot: "tired cat"
-Bot → you: [the matching stickers, each with a button to open its pack]
+You:  tired cat
+Bot:  matching stickers, each with a button to open its pack
 ```
 
 100% local and private: it runs on your machine and the only network traffic is
 the normal Telegram API. Your stickers are never uploaded anywhere or used to
 train anything.
 
-> 🔍 Works in **any language** (Russian, Chinese, English, …) — quality depends
-> on the chosen [embedding model](#embedding-models).
+Works in any language (Russian, Chinese, English, ...) — quality depends on the
+chosen [embedding model](#embedding-models).
 
 <!-- Tip: add a demo.gif here, e.g.  ![demo](docs/demo.gif) -->
 
 ### Features
 
-- 🧠 **Semantic search** over stickers, favorites, recents and saved GIFs
-- 🌍 **Multilingual** queries out of the box (33+ languages with the default model)
-- 🔒 **Private** — local index, owner-only bot, session never leaves your disk
-- 🔄 **Incremental** — re-`sync` only processes new stickers
-- 🔌 **Swappable models** — one line in `.env`, from 0.2 GB to 7 GB
-- 👤 **Multiple accounts** via named profiles
-- 🖥️ **Cross-platform** — Linux, macOS, Windows
+- **Semantic search** over stickers, favorites, recents and saved GIFs
+- **Multilingual** queries out of the box
+- **Private** — local index, owner-only bot, session never leaves your disk
+- **Incremental** — re-`sync` only processes new stickers
+- **Swappable models** — change one line in `.env`
+- **Cross-platform** — Linux, macOS, Windows
 
 ---
 
@@ -50,7 +49,7 @@ Everything runs on your machine. No data leaves except standard Telegram API cal
 | Dependency | Notes |
 |---|---|
 | Python 3.11+ | 3.12 recommended |
-| [ffmpeg](https://ffmpeg.org/download.html) | Must be in `PATH` (used for animated/video stickers) |
+| ffmpeg | Must be in `PATH` (used for animated/video stickers) |
 | RAM | ~6–8 GB for the 2B default model; ~2 GB if you use `siglip2-base` |
 | A Telegram account | With sticker packs installed |
 
@@ -124,7 +123,7 @@ Put all four into `.env`.
 
 `python -m app login` asks you to choose:
 
-- **QR code (recommended):** Open Telegram on your phone → Settings → Devices → Link Desktop Device → scan the QR in the terminal. The QR auto-refreshes.
+- **QR code (recommended):** On your phone, open Telegram, go to Settings > Devices > Link Desktop Device, and scan the QR shown in the terminal. The QR auto-refreshes.
 - **Phone number:** The code arrives as a message from the official *Telegram* account (user 777000) **inside the Telegram app — not as SMS**. If it never arrives, use QR login instead.
 
 If you have 2FA enabled, you'll be asked for your password.
@@ -134,13 +133,13 @@ If you have 2FA enabled, you'll be asked for your password.
 ## CLI reference
 
 ```
-python -m app <command> [--profile NAME]
+python -m app <command>
 ```
 
 | Command | Description |
 |---|---|
 | `login [--method qr\|phone]` | Authenticate Telegram account |
-| `sync` | Run full pipeline: metadata → download → preview → embed |
+| `sync` | Run the full pipeline: metadata, download, preview, embed |
 | `sync --metadata` | Metadata stage only |
 | `sync --download` | Download stage only |
 | `sync --preview` | Preview extraction only |
@@ -152,10 +151,7 @@ python -m app <command> [--profile NAME]
 | `stats` | Show disk usage, model cache size, failure reasons |
 | `prune` | Delete local media for stickers already sent once (frees disk) |
 | `models` | List available embedding models and upgrade instructions |
-| `session list` | Show all saved profiles |
-| `session use <name>` | Switch active profile |
-| `session delete <name>` | Remove a profile |
-| `session reset` | Delete session file (re-login required) |
+| `session reset` | Delete the session file (re-login required) |
 | `search "<query>"` | CLI search for testing |
 | `run` | Start the Telegram bot |
 
@@ -177,11 +173,11 @@ python -m app <command> [--profile NAME]
 
 Re-running `sync` is safe and efficient. The pipeline only processes items that haven't been handled yet:
 
-- Added a new sticker pack? Run `sync` → only the new pack is downloaded and embedded.
+- Added a new sticker pack? Run `sync` and only the new pack is downloaded and embedded.
 - Removed a pack from Telegram? The local copy stays (use `stats` to track disk usage).
 - Existing items with `download_status=ok` are never re-downloaded.
 
-**Changing the model is automatic:** if you switch `MODEL_NAME` and run `sync`, StickerRadar detects that existing items have no vectors for the new model and re-embeds them (using the kept media — no re-download). Unchanged model → only genuinely new items are processed.
+**Changing the model is automatic:** if you switch `MODEL_NAME` and run `sync`, StickerRadar detects that existing items have no vectors for the new model and re-embeds them (using the kept media, no re-download). If the model is unchanged, only genuinely new items are processed.
 
 To force a full rebuild after changing `FRAME_COUNT` (frame structure changes):
 
@@ -199,22 +195,22 @@ StickerRadar uses **CLIP-style multimodal models** that encode both images and t
 python -m app models    # list all options + per-model install instructions
 ```
 
-| Model | Params | Size | License | Languages / notes |
+| Model | Params | Size | License | Notes |
 |---|---|---|---|---|
-| `Qwen/Qwen3-VL-Embedding-2B` *(default)* | 2B | ~4–5 GB | Apache-2.0 | 33 langs incl. RU/ZH, multimodal |
-| `google/siglip2-base-patch16-224` *(verified)* | 0.4B | ~1.5 GB | Apache-2.0 | multilingual; light, safe fallback |
-| `google/siglip2-large-patch16-256` | 0.9B | ~3.6 GB | Apache-2.0 | multilingual |
-| `jinaai/jina-clip-v2` | 0.9B | ~3.4 GB | non-commercial | ~89 languages |
-| `jinaai/jina-embeddings-v5-omni-nano-retrieval` *(experimental)* | ~1.0B | ~2 GB | non-commercial | 108 supported, 2026, multimodal |
-| `jinaai/jina-embeddings-v5-omni-small-retrieval` *(experimental)* | ~1.7B | ~3.5 GB | non-commercial | 93 supported, 2026, multimodal |
-| `openai/clip-vit-large-patch14` | 0.4B | ~1.6 GB | MIT | English only |
-| `apple/MobileCLIP2-S2` *(experimental)* | small | ~200 MB | research | English-leaning |
-| `jinaai/jina-embeddings-v4` *(legacy)* | 3.8B | ~7.5 GB | non-commercial | heavy, GPU recommended |
+| `Qwen/Qwen3-VL-Embedding-2B` | 2B | ~4.26 GB | Apache-2.0 | 30+ langs, multimodal (default) |
+| `google/siglip2-base-patch16-224` | 0.4B | ~1.5 GB | Apache-2.0 | multilingual (load-tested fallback) |
+| `google/siglip2-large-patch16-256` | 0.9B | ~3.53 GB | Apache-2.0 | multilingual |
+| `jinaai/jina-clip-v2` | 0.9B | ~1.73 GB | CC BY-NC 4.0 | 89 langs, multimodal |
+| `jinaai/jina-embeddings-v5-omni-nano-retrieval` | ~0.95B | ~1.9 GB | CC BY-NC 4.0 | multimodal; language count unconfirmed |
+| `jinaai/jina-embeddings-v5-omni-small-retrieval` | ~1.56B | ~3.12 GB | CC BY-NC 4.0 | multimodal; language count unconfirmed |
+| `openai/clip-vit-large-patch14` | 0.4B | ~1.71 GB | MIT | English only |
+| `apple/MobileCLIP2-S2` | ~99M | ~398 MB | Apple AMLR (research) | small |
+| `jinaai/jina-embeddings-v4` | 4B | ~7.89 GB | Qwen Research License | heavy, multimodal, 30+ langs |
 
-> ⚠ Sizes/params/languages reflect each model's public model card; where an
-> official language list isn't published (e.g. SigLIP2), **test your languages locally**.
+Sizes are approximate (core model weights). Where a model card doesn't publish an
+exact language list, test your languages locally rather than trusting a number.
 
-**Default** is `Qwen/Qwen3-VL-Embedding-2B` (Apache-2.0, strongest open-license option). It needs extra dependencies and is **not load-tested in this project** — if it fails on the first `sync`, fall back to the verified model:
+**Default** is `Qwen/Qwen3-VL-Embedding-2B` (Apache-2.0, strongest open-license option). It is heavy and needs to run on CPU on GPUs under ~8 GB. If it fails on the first `sync`, fall back to the load-tested model:
 
 ```bash
 # In .env:
@@ -236,22 +232,6 @@ MODEL_NAME=/home/me/models/my-clip      # local path (C:\models\my-clip on Windo
 ```
 
 It's loaded via sentence-transformers and must be a CLIP-style model that embeds **both** images and text.
-
----
-
-## Multiple accounts (profiles)
-
-Each profile has its own session file and database:
-
-```bash
-python -m app login --profile work
-python -m app sync --profile work
-python -m app session use work       # set as default
-python -m app session list
-python -m app session delete work
-```
-
-The active profile is stored in `data/.active_profile`.
 
 ---
 
@@ -288,45 +268,15 @@ Pruned stickers still send instantly via their cached `file_id`. (If you later s
 
 ---
 
-## Project layout
-
-```
-app/
-  __main__.py     — unified CLI entrypoint (python -m app)
-  auth.py         — QR and phone login helpers
-  models.py       — embedding model registry
-  config.py       — env loading, paths, profile support
-  db.py           — SQLite schema and queries
-  tg_user.py      — Telethon user-client wrapper
-  scanner.py      — sync pipeline orchestration
-  media_store.py  — download and local path logic
-  preview.py      — frame extraction (webp / tgs / webm / gif)
-  embeddings.py   — CLIP model wrapper with batch encoding
-  search.py       — vector search and metadata ranking
-  bot.py          — aiogram bot handlers
-  sender.py       — sendSticker/sendAnimation + file_id cache
-  main.py         — asyncio entrypoint for the bot
-scripts/
-  inventory.py    — quick Telegram access test
-  eval_queries.py — search quality evaluation (HTML report)
-data/             — local only, gitignored
-  sessions/       — Telethon session files (sensitive)
-  media/          — downloaded stickers and GIFs
-  previews/       — extracted PNG frames
-  *.sqlite        — per-profile databases
-```
-
----
-
 ## Troubleshooting
 
-**Login code not arriving via phone** → use QR login: `python -m app login --method qr`
+**Login code not arriving via phone:** use QR login, `python -m app login --method qr`
 
-**"database is locked"** → only one process can use the session at a time. Stop any running `python -m app run` before running `sync` manually, or use the bot's `/sync` command which reuses the active connection.
+**"database is locked":** only one process can use the session at a time. Stop any running `python -m app run` before running `sync` manually, or use the bot's `/sync` command which reuses the active connection.
 
-**Download fails: "file_reference may be expired"** → run `sync --metadata` first to refresh references, then `sync --download`.
+**Download fails ("file_reference may be expired"):** run `sync --metadata` first to refresh references, then `sync --download`.
 
-**Search returns nothing after sync** → check `python -m app status`: `embedded` count should be > 0. If it's 0, run `python -m app sync --embed`.
+**Search returns nothing after sync:** check `python -m app status` — the `embedded` count should be above 0. If it's 0, run `python -m app sync --embed`.
 
 ---
 

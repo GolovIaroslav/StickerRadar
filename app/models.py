@@ -37,14 +37,14 @@ REGISTRY: list[ModelEntry] = [
         key="Qwen/Qwen3-VL-Embedding-2B",
         loader="st",
         params="2B",
-        size="~4-5 GB",
+        size="~4.26 GB",
         license="Apache-2.0",
         quality="best",
-        langs="33 languages incl. Russian & Chinese; multimodal (text/image/video)",
+        langs="30+ languages; multimodal (text/image/video)",
         trust_remote_code=True,
         verified=True,
         notes=(
-            "Default. Strongest open-license (Apache-2.0) option. Multimodal, 33 languages.\n"
+            "Default. Strongest open-license (Apache-2.0) option. Multimodal, 30+ languages.\n"
             "Loads via sentence-transformers; needs torchvision (already a dependency).\n"
             "Heavy: ~2B params. Does NOT fit small GPUs (<8 GB) — runs on CPU automatically.\n"
             "On a small/busy GPU set  DEVICE=cpu  in .env (slower but works; uses RAM)."
@@ -68,7 +68,7 @@ REGISTRY: list[ModelEntry] = [
         key="google/siglip2-large-patch16-256",
         loader="hf",
         params="0.9B",
-        size="~3.6 GB",
+        size="~3.53 GB",
         license="Apache-2.0",
         quality="better",
         langs="multilingual; exact language list not published — test RU/ZH locally",
@@ -81,10 +81,10 @@ REGISTRY: list[ModelEntry] = [
         key="jinaai/jina-clip-v2",
         loader="st",
         params="0.9B",
-        size="~3.4 GB",
-        license="CC-BY-NC (non-commercial)",
+        size="~1.73 GB",
+        license="CC-BY-NC-4.0",
         quality="best",
-        langs="89 image-retrieval languages (94 in HF tags); RU usually covered (XLM-R backbone)",
+        langs="89 languages; multimodal (image+text)",
         trust_remote_code=True,
         notes=(
             "Proven quality option (2024). NON-COMMERCIAL license.\n"
@@ -95,11 +95,11 @@ REGISTRY: list[ModelEntry] = [
     ModelEntry(
         key="jinaai/jina-embeddings-v5-omni-nano-retrieval",
         loader="st",
-        params="~1.0B",
-        size="~2 GB",
-        license="CC-BY-NC (non-commercial)",
+        params="~0.95B",
+        size="~1.9 GB",
+        license="CC-BY-NC-4.0",
         quality="best",
-        langs="32 trained / 108 supported; multimodal (text/image/video/audio)",
+        langs="multimodal (text/image/video/audio); language count unconfirmed",
         trust_remote_code=True,
         experimental=True,
         notes=(
@@ -111,11 +111,11 @@ REGISTRY: list[ModelEntry] = [
     ModelEntry(
         key="jinaai/jina-embeddings-v5-omni-small-retrieval",
         loader="st",
-        params="~1.7B",
-        size="~3.5 GB",
-        license="CC-BY-NC (non-commercial)",
+        params="~1.56B",
+        size="~3.12 GB",
+        license="CC-BY-NC-4.0",
         quality="best",
-        langs="32 trained / 93 supported; multimodal (text/image/video/audio/PDF)",
+        langs="multimodal (text/image/video/audio/PDF); language count unconfirmed",
         trust_remote_code=True,
         experimental=True,
         notes=(
@@ -127,7 +127,7 @@ REGISTRY: list[ModelEntry] = [
         key="openai/clip-vit-large-patch14",
         loader="hf",
         params="0.4B",
-        size="~1.6 GB",
+        size="~1.71 GB",
         license="MIT",
         quality="good",
         langs="English only",
@@ -139,11 +139,11 @@ REGISTRY: list[ModelEntry] = [
     ModelEntry(
         key="apple/MobileCLIP2-S2",
         loader="open_clip",
-        params="small",
-        size="~200 MB",
-        license="Apple ML (research)",
+        params="~99M",
+        size="~398 MB",
+        license="Apple AMLR (research)",
         quality="fast",
-        langs="English-leaning; RU/multilingual NOT verified",
+        langs="small; English-leaning not formally confirmed",
         experimental=True,
         notes=(
             "Apple MobileCLIP2 (2025). Tiny and very fast, English-leaning.\n"
@@ -154,15 +154,15 @@ REGISTRY: list[ModelEntry] = [
     ModelEntry(
         key="jinaai/jina-embeddings-v4",
         loader="st",
-        params="3.8B",
-        size="~7.5 GB",
-        license="CC-BY-NC (non-commercial)",
+        params="4B",
+        size="~7.89 GB",
+        license="Qwen Research License",
         quality="best",
-        langs="29 supported / 34 trained languages; multimodal",
+        langs="30+ languages; multimodal",
         trust_remote_code=True,
         experimental=True,
         notes=(
-            "LEGACY (superseded by v5-omni). Very large (~7.5 GB), GPU recommended.\n"
+            "LEGACY (superseded by v5-omni). Very large (~7.89 GB), GPU recommended.\n"
             "Needs:  uv add peft einops"
         ),
     ),
