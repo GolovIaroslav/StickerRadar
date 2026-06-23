@@ -313,9 +313,13 @@ def upsert_frame_embedding(
 def mark_items_for_model(model_name: str) -> int:
     """
     Find downloaded items that have NO embedding for `model_name` and mark them
-    pending for preview + embed (so a plain `sync` re-does only what's needed
-    when the model changes). Returns the number of items flagged.
+    pending for embedding (so a plain `sync` re-does only what's needed when the
+    model changes). Preview is re-flagged ONLY when the preview frames are
+    missing on disk — so an interrupted run resumes at embed instead of
+    re-extracting frames it already has. Returns the number of items flagged.
     """
+    from pathlib import Path
+
     conn = get_conn()
     rows = conn.execute(
         """
@@ -330,15 +334,28 @@ def mark_items_for_model(model_name: str) -> int:
         """,
         (model_name,),
     ).fetchall()
-    ids = [r["id"] for r in rows]
-    for media_id in ids:
-        conn.execute(
-            "UPDATE media_items SET preview_status='pending', embed_status='pending', "
-            "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (media_id,),
-        )
+
+    for r in rows:
+        media_id = r["id"]
+        frames = conn.execute(
+            "SELECT preview_path FROM media_frames WHERE media_id=?", (media_id,)
+        ).fetchall()
+        previews_ok = bool(frames) and all(Path(f["preview_path"]).exists() for f in frames)
+        if previews_ok:
+            # Frames already on disk — just re-embed, skip preview.
+            conn.execute(
+                "UPDATE media_items SET embed_status='pending', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (media_id,),
+            )
+        else:
+            # Frames missing (new item, or deleted after a previous embed) — regenerate.
+            conn.execute(
+                "UPDATE media_items SET preview_status='pending', embed_status='pending', "
+                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (media_id,),
+            )
     conn.commit()
-    return len(ids)
+    return len(rows)
 
 
 def force_reindex() -> int:
