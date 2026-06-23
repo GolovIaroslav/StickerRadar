@@ -1,9 +1,10 @@
 """
-app/scanner.py — metadata sync and media downloads.
+app/scanner.py — metadata sync, media downloads, and preview extraction.
 
 Usage:
     python -m app.scanner --metadata-only [--limit N]
     python -m app.scanner --download [--limit N]
+    python -m app.scanner --preview [--limit N]
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import argparse
 import asyncio
 import sys
 
-from app import config, db, media_store
+from app import config, db, media_store, preview
 from app.tg_user import GifDoc, StickerDoc, TgUserClient
 
 
@@ -135,6 +136,26 @@ async def _run_download(limit: int | None) -> None:
     _print_counts()
 
 
+def _run_preview(limit: int | None) -> None:
+    config.ensure_dirs()
+    db.get_conn()
+    ffmpeg = config.require_ffmpeg()
+
+    rows = db.list_pending_previews(limit if limit is not None else 10 ** 9)
+    total = len(rows)
+    if not total:
+        print("No pending previews.")
+        _print_counts()
+        return
+
+    for i, row in enumerate(rows, start=1):
+        label = f"Preview {i}/{total}: [{row['sticker_format'] or row['mime_type']}] {row['tg_document_id']}"
+        print(label)
+        preview.extract_previews(row, ffmpeg)
+
+    _print_counts()
+
+
 def _print_counts() -> None:
     counts = db.get_status_counts()
     print("\n── Status ──────────────────────────────────────")
@@ -159,6 +180,11 @@ def main() -> None:
         action="store_true",
         help="Download pending media files",
     )
+    group.add_argument(
+        "--preview",
+        action="store_true",
+        help="Extract preview frames for downloaded media",
+    )
     parser.add_argument(
         "--limit",
         type=int,
@@ -171,8 +197,10 @@ def main() -> None:
     try:
         if args.metadata_only:
             asyncio.run(_run_metadata_sync(args.limit))
-        else:
+        elif args.download:
             asyncio.run(_run_download(args.limit))
+        else:
+            _run_preview(args.limit)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(0)
