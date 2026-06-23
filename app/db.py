@@ -330,6 +330,13 @@ def list_pending_embeddings(limit: int = 100) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def list_frames_for_media(media_id: int) -> list[sqlite3.Row]:
+    return get_conn().execute(
+        "SELECT * FROM media_frames WHERE media_id=? ORDER BY frame_index",
+        (media_id,),
+    ).fetchall()
+
+
 def get_status_counts() -> dict[str, int]:
     conn = get_conn()
     total = conn.execute("SELECT COUNT(*) FROM media_items").fetchone()[0]

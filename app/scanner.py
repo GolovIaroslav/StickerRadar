@@ -136,6 +136,50 @@ async def _run_download(limit: int | None) -> None:
     _print_counts()
 
 
+def _run_embed(limit: int | None) -> None:
+    config.ensure_dirs()
+    db.get_conn()
+
+    rows = db.list_pending_embeddings(limit if limit is not None else 10 ** 9)
+    total = len(rows)
+    if not total:
+        print("No pending embeddings.")
+        _print_counts()
+        return
+
+    from app.embeddings import Embedder
+    from pathlib import Path
+
+    embedder = Embedder()
+
+    for i, row in enumerate(rows, start=1):
+        media_id = row["id"]
+        print(f"Embed {i}/{total}: {row['tg_document_id']}")
+        try:
+            frames = db.list_frames_for_media(media_id)
+            if not frames:
+                db.mark_embed_failed(media_id, "no frames")
+                print("  SKIP: no frames")
+                continue
+            for frame in frames:
+                path = Path(frame["preview_path"])
+                if not path.exists():
+                    raise FileNotFoundError(f"Preview missing: {path}")
+                vec = embedder.embed_image(path)
+                db.upsert_frame_embedding(
+                    frame_id=frame["id"],
+                    model_name=embedder.model_name,
+                    dim=len(vec),
+                    vector_bytes=vec.tobytes(),
+                )
+            db.mark_embed_ok(media_id)
+        except Exception as exc:
+            db.mark_embed_failed(media_id, str(exc)[:200])
+            print(f"  ERROR: {exc}")
+
+    _print_counts()
+
+
 def _run_preview(limit: int | None) -> None:
     config.ensure_dirs()
     db.get_conn()
@@ -185,6 +229,11 @@ def main() -> None:
         action="store_true",
         help="Extract preview frames for downloaded media",
     )
+    group.add_argument(
+        "--embed",
+        action="store_true",
+        help="Compute CLIP embeddings for preview frames",
+    )
     parser.add_argument(
         "--limit",
         type=int,
@@ -199,8 +248,10 @@ def main() -> None:
             asyncio.run(_run_metadata_sync(args.limit))
         elif args.download:
             asyncio.run(_run_download(args.limit))
-        else:
+        elif args.preview:
             _run_preview(args.limit)
+        else:
+            _run_embed(args.limit)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(0)
