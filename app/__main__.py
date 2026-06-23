@@ -227,25 +227,33 @@ def cmd_prune(args: argparse.Namespace) -> None:
 
 
 def cmd_models(_args: argparse.Namespace) -> None:
-    from app.models import REGISTRY, INCOMPATIBLE, fmt_size
+    from app.models import REGISTRY, INCOMPATIBLE
     from app import config
 
     active = config.MODEL_NAME
     print("\nAvailable embedding models")
-    print("─" * 86)
-    print(f"  {'MODEL KEY':<40} {'QUALITY':<6} {'SIZE':<9} LANGS")
-    print("─" * 86)
+    print("─" * 100)
+    print(f"  {'MODEL KEY':<46} {'PARAMS':<7} {'SIZE':<9} {'LICENSE':<14} LANGUAGES")
+    print("─" * 100)
     for m in REGISTRY:
-        marker = "  ← active" if m.key == active else ""
-        exp = " [experimental]" if m.experimental else ""
-        print(f"  {m.key:<40} {m.quality:<6} {fmt_size(m.size_mb):<9} {m.langs_note}{marker}{exp}")
+        tags = []
+        if m.key == active:
+            tags.append("← active")
+        if m.verified:
+            tags.append("verified")
+        if m.experimental:
+            tags.append("experimental")
+        tag = ("   " + ", ".join(tags)) if tags else ""
+        print(f"  {m.key:<46} {m.params:<7} {m.size:<9} {m.license:<14} {m.langs}{tag}")
     print()
     print("To switch model:")
     print("  1. Set MODEL_NAME=<key> in .env  (install any extra deps shown below)")
     print("  2. Run: python -m app sync --reindex")
     print()
-    print("Custom CLIP-compatible model not in this list:")
-    print("  Set MODEL_NAME=<id> in .env (loaded via sentence-transformers).")
+    print("Custom CLIP-style model not in this list — MODEL_NAME accepts either:")
+    print("  • a Hugging Face id   e.g.  MODEL_NAME=org/model-name")
+    print("  • a local folder path e.g.  MODEL_NAME=/home/me/models/my-clip")
+    print("  Loaded via sentence-transformers; it must embed BOTH images and text.")
     print()
     print("⚠  NOT compatible (cannot encode sticker images):")
     for name, why in INCOMPATIBLE:
@@ -254,7 +262,7 @@ def cmd_models(_args: argparse.Namespace) -> None:
     for m in REGISTRY:
         if m.notes:
             label = m.key.split("/")[-1]
-            print(f"[{label}]  ({fmt_size(m.size_mb)})")
+            print(f"[{label}]  {m.params} · {m.size} · {m.license}")
             for line in m.notes.splitlines():
                 print(f"  {line}")
             print()

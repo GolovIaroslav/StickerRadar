@@ -81,7 +81,7 @@ EVAL_DIR: Path = DATA_DIR / "eval"
 
 MODEL_NAME: str = _str(
     "MODEL_NAME",
-    "google/siglip2-base-patch16-224",
+    "Qwen/Qwen3-VL-Embedding-2B",
 )
 
 # ---------------------------------------------------------------------------

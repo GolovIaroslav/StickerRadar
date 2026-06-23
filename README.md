@@ -24,7 +24,7 @@ train anything.
 ### Features
 
 - 🧠 **Semantic search** over stickers, favorites, recents and saved GIFs
-- 🌍 **Multilingual** queries out of the box (SigLIP2 default)
+- 🌍 **Multilingual** queries out of the box (33+ languages with the default model)
 - 🔒 **Private** — local index, owner-only bot, session never leaves your disk
 - 🔄 **Incremental** — re-`sync` only processes new stickers
 - 🔌 **Swappable models** — one line in `.env`, from 0.2 GB to 7 GB
@@ -51,15 +51,15 @@ Everything runs on your machine. No data leaves except standard Telegram API cal
 |---|---|
 | Python 3.11+ | 3.12 recommended |
 | [ffmpeg](https://ffmpeg.org/download.html) | Must be in `PATH` (used for animated/video stickers) |
-| ~1 GB RAM | For the default model on CPU |
+| RAM | ~6–8 GB for the 2B default model; ~2 GB if you use `siglip2-base` |
 | A Telegram account | With sticker packs installed |
 
 Runs on **Linux, macOS, and Windows**. On Windows, use PowerShell or Windows
 Terminal (for clean QR rendering) and make sure `ffmpeg` is on your `PATH`.
 
-A GPU is **optional**: if you install a CUDA build of PyTorch, embedding is used
-on the GPU automatically. Plain CPU is fine for one-time indexing of a few
-thousand stickers.
+A GPU is **optional but recommended for the larger models**: if you install a
+CUDA build of PyTorch, embedding runs on the GPU automatically. On CPU the small
+`siglip2-base` model is fine; the 2B+ models are slow on CPU.
 
 ---
 
@@ -196,28 +196,43 @@ StickerRadar uses **CLIP-style multimodal models** that encode both images and t
 python -m app models    # list all options + per-model install instructions
 ```
 
-| Model | Quality | Size | Languages |
-|---|---|---|---|
-| `google/siglip2-base-patch16-224` *(default)* | good | ~0.4 GB | multilingual (RU, ZH, 100+) |
-| `google/siglip2-large-patch16-256` | best | ~1.5 GB | multilingual |
-| `jinaai/jina-clip-v2` | best | ~3.5 GB | 89 (incl. RU, ZH) |
-| `openai/clip-vit-large-patch14` | good | ~1.7 GB | English only |
-| `apple/MobileCLIP2-S2` *(experimental)* | fast | ~0.2 GB | English-leaning |
-| `jinaai/jina-embeddings-v4` *(experimental)* | best | ~7.5 GB | multilingual |
-| `Qwen/Qwen3-VL-Embedding-2B` *(experimental)* | best | ~4.5 GB | multilingual |
+| Model | Params | Size | License | Languages / notes |
+|---|---|---|---|---|
+| `Qwen/Qwen3-VL-Embedding-2B` *(default)* | 2B | ~4–5 GB | Apache-2.0 | 33 langs incl. RU/ZH, multimodal |
+| `google/siglip2-base-patch16-224` *(verified)* | 0.4B | ~1.5 GB | Apache-2.0 | multilingual; light, safe fallback |
+| `google/siglip2-large-patch16-256` | 0.9B | ~3.6 GB | Apache-2.0 | multilingual |
+| `jinaai/jina-clip-v2` | 0.9B | ~3.4 GB | non-commercial | ~89 languages |
+| `jinaai/jina-embeddings-v5-omni-nano-retrieval` *(experimental)* | ~1.0B | ~2 GB | non-commercial | 108 supported, 2026, multimodal |
+| `jinaai/jina-embeddings-v5-omni-small-retrieval` *(experimental)* | ~1.7B | ~3.5 GB | non-commercial | 93 supported, 2026, multimodal |
+| `openai/clip-vit-large-patch14` | 0.4B | ~1.6 GB | MIT | English only |
+| `apple/MobileCLIP2-S2` *(experimental)* | small | ~200 MB | research | English-leaning |
+| `jinaai/jina-embeddings-v4` *(legacy)* | 3.8B | ~7.5 GB | non-commercial | heavy, GPU recommended |
 
-**Default** is Google SigLIP2 (2025) — modern, multilingual, small. To upgrade quality:
+> ⚠ Sizes/params/languages reflect each model's public model card; where an
+> official language list isn't published (e.g. SigLIP2), **test your languages locally**.
+
+**Default** is `Qwen/Qwen3-VL-Embedding-2B` (Apache-2.0, strongest open-license option). It needs extra dependencies and is **not load-tested in this project** — if it fails on the first `sync`, fall back to the verified model:
 
 ```bash
 # In .env:
-MODEL_NAME=jinaai/jina-clip-v2
-uv add einops          # this model needs einops
+MODEL_NAME=google/siglip2-base-patch16-224   # tested, lightweight
 python -m app sync --reindex
 ```
 
-**Not compatible:** text-only embedders (Gemini Embedding, Qwen3 *text* embedding, OpenAI text-embedding-3, BGE, E5) cannot encode sticker images, so they cannot be used for this kind of image search.
+To switch to any model, set `MODEL_NAME` in `.env`, install any extra deps shown by `python -m app models`, then run `python -m app sync --reindex`.
 
-**Custom model:** set `MODEL_NAME` in `.env` to any CLIP-style model on Hugging Face (loaded via sentence-transformers).
+**Licenses matter:** several strong models (Jina) are **non-commercial**. For commercial use, prefer the Apache-2.0 models (Qwen3-VL, SigLIP2) or MIT (OpenAI CLIP).
+
+**Not compatible:** text-only embedders (Gemini Embedding, Qwen3 *text* embedding, OpenAI text-embedding-3, BGE, E5) cannot encode sticker images.
+
+**Custom model:** `MODEL_NAME` accepts either a Hugging Face id **or a local folder path**:
+
+```bash
+MODEL_NAME=org/some-clip-model          # Hugging Face
+MODEL_NAME=/home/me/models/my-clip      # local path (C:\models\my-clip on Windows)
+```
+
+It's loaded via sentence-transformers and must be a CLIP-style model that embeds **both** images and text.
 
 ---
 

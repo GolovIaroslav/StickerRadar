@@ -169,17 +169,26 @@ class Embedder:
         from app.models import get as registry_get
         entry = registry_get(config.MODEL_NAME)
 
-        if entry is None:
-            # Custom model not in registry — use sentence-transformers.
-            image_model = config.IMAGE_MODEL_NAME or config.MODEL_NAME
-            self._backend = _STBackend(config.MODEL_NAME, image_model, trust_remote_code=True)
-        elif entry.loader == "hf":
-            self._backend = _HFBackend(entry.key, entry.text_padding, entry.trust_remote_code)
-        elif entry.loader == "open_clip":
-            self._backend = _OpenClipBackend(entry.key)
-        else:  # "st"
-            image_model = config.IMAGE_MODEL_NAME or entry.key
-            self._backend = _STBackend(entry.key, image_model, entry.trust_remote_code)
+        try:
+            if entry is None:
+                # Custom model not in registry — a Hugging Face id OR a local path.
+                # Loaded via sentence-transformers; must be CLIP-style (image + text).
+                image_model = config.IMAGE_MODEL_NAME or config.MODEL_NAME
+                self._backend = _STBackend(config.MODEL_NAME, image_model, trust_remote_code=True)
+            elif entry.loader == "hf":
+                self._backend = _HFBackend(entry.key, entry.text_padding, entry.trust_remote_code)
+            elif entry.loader == "open_clip":
+                self._backend = _OpenClipBackend(entry.key)
+            else:  # "st"
+                image_model = config.IMAGE_MODEL_NAME or entry.key
+                self._backend = _STBackend(entry.key, image_model, entry.trust_remote_code)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load embedding model '{config.MODEL_NAME}':\n  {exc}\n\n"
+                "It may need extra dependencies or a custom loader. Run `python -m app models`\n"
+                "for install notes, or use the verified fallback in .env:\n"
+                "  MODEL_NAME=google/siglip2-base-patch16-224"
+            ) from exc
 
         return self._backend
 
