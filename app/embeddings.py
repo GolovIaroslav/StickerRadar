@@ -176,6 +176,23 @@ class Embedder:
     def model_name(self) -> str:
         return config.MODEL_NAME
 
+    @staticmethod
+    def _warn_if_low_vram() -> None:
+        """Print free GPU memory and warn if a large model is unlikely to fit."""
+        try:
+            import torch
+            free, total = torch.cuda.mem_get_info()
+            free_gb, total_gb = free / 1e9, total / 1e9
+            print(f"GPU memory: {free_gb:.1f} GB free / {total_gb:.1f} GB total")
+            if free_gb < 6.0:
+                print(
+                    f"⚠  Only {free_gb:.1f} GB free on the GPU. Large models (2B+) may not fit\n"
+                    "   and will fall back to CPU. To avoid the failed attempt, set DEVICE=cpu\n"
+                    "   in .env, or use a smaller model (python -m app models)."
+                )
+        except Exception:
+            pass
+
     def _build(self, device: str):
         from app.models import get as registry_get
         entry = registry_get(config.MODEL_NAME)
@@ -197,13 +214,20 @@ class Embedder:
             return self._backend
 
         device = _resolve_device(config.DEVICE)
+        if device == "cuda":
+            self._warn_if_low_vram()
         try:
             self._backend = self._build(device)
         except Exception as exc:
             # Out of GPU memory → automatically retry on CPU.
             if device == "cuda" and _is_oom(exc):
-                print("GPU out of memory — falling back to CPU (slower). "
-                      "Set DEVICE=cpu in .env to skip this attempt next time.")
+                print(
+                    "\n" + "!" * 64 + "\n"
+                    "!  GPU OUT OF MEMORY — falling back to CPU (uses RAM, slower).\n"
+                    "!  Set DEVICE=cpu in .env to skip the GPU attempt next time,\n"
+                    "!  or switch to a smaller model (e.g. siglip2-base).\n"
+                    + "!" * 64 + "\n"
+                )
                 try:
                     import torch
                     torch.cuda.empty_cache()
