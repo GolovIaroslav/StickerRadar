@@ -8,11 +8,11 @@
 *.session-journal
 data/
 
+# --- Markdown docs (local only, never commit) ---
+*.md
+!README.md
+
 # --- Agent/AI working files (local only) ---
-memory.md
-todo.md
-decisions.md
-MEMORY.md
 .claude/
 .aider/
 .cursor/
