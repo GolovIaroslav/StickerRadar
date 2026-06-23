@@ -11,12 +11,26 @@ import logging
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app import config, db
 from app.search import SearchResult
 
 log = logging.getLogger(__name__)
+
+
+def _pack_markup(result: SearchResult) -> InlineKeyboardMarkup | None:
+    """Inline button showing the sticker's pack; opens it when tapped."""
+    if not result.set_short_name:
+        return None
+    title = result.set_title or result.set_short_name
+    if len(title) > 60:
+        title = title[:57] + "…"
+    button = InlineKeyboardButton(
+        text=f"📦 {title}",
+        url=f"https://t.me/addstickers/{result.set_short_name}",
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
 async def send_result(bot: Bot, chat_id: int, result: SearchResult) -> bool:
@@ -38,11 +52,12 @@ async def send_result(bot: Bot, chat_id: int, result: SearchResult) -> bool:
 
 
 async def _send_cached(bot: Bot, chat_id: int, result: SearchResult) -> bool:
+    markup = _pack_markup(result)
     try:
         if result.bot_send_method == "sticker":
-            msg = await bot.send_sticker(chat_id, result.bot_file_id)
+            await bot.send_sticker(chat_id, result.bot_file_id, reply_markup=markup)
         else:
-            msg = await bot.send_animation(chat_id, result.bot_file_id)
+            await bot.send_animation(chat_id, result.bot_file_id, reply_markup=markup)
         return True
     except Exception as e:
         log.warning("Cached send failed for media_id=%s: %s", result.media_id, e)
@@ -52,14 +67,15 @@ async def _send_cached(bot: Bot, chat_id: int, result: SearchResult) -> bool:
 async def _send_upload(bot: Bot, chat_id: int, result: SearchResult) -> bool:
     path = Path(result.local_path)
     send_method = _pick_send_method(result)
+    markup = _pack_markup(result)
     try:
         file = FSInputFile(path)
         if send_method == "sticker":
-            msg = await bot.send_sticker(chat_id, file)
+            msg = await bot.send_sticker(chat_id, file, reply_markup=markup)
             file_id = msg.sticker.file_id
             file_unique_id = msg.sticker.file_unique_id
         else:
-            msg = await bot.send_animation(chat_id, file)
+            msg = await bot.send_animation(chat_id, file, reply_markup=markup)
             file_id = msg.animation.file_id
             file_unique_id = msg.animation.file_unique_id
 

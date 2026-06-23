@@ -12,7 +12,10 @@ description = "Local semantic search for your Telegram stickers and saved GIFs"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-keywords = ["telegram", "stickers", "search", "semantic", "clip", "vector"]
+keywords = [
+    "telegram", "stickers", "gif", "search", "semantic-search",
+    "clip", "siglip", "embeddings", "vector-search", "aiogram", "telethon",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
@@ -42,11 +45,11 @@ lottie = ["lottie>=0.7"]
 dev = ["ruff>=0.4", "pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-stickerradar = "app.main:cli_main"
+stickerradar = "app.__main__:main"
 
 [project.urls]
-Repository = "https://github.com/golov-j/StickerRadar"
-"Bug Tracker" = "https://github.com/golov-j/StickerRadar/issues"
+Repository = "https://github.com/GolovIaroslav/StickerRadar"
+"Bug Tracker" = "https://github.com/GolovIaroslav/StickerRadar/issues"
 
 [tool.ruff]
 line-length = 100

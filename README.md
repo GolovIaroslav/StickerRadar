@@ -1,15 +1,35 @@
 # StickerRadar
 
-**Local semantic search for your Telegram stickers and saved GIFs.**
+**Find your Telegram stickers by meaning, not by scrolling.**
 
-Type a phrase into your private bot and get the most relevant stickers back — no manual tagging, no cloud service, no third-party access to your account.
+StickerRadar indexes every sticker and saved GIF in your Telegram account with a
+local AI vision model, then lets you search them in plain language through your
+own private bot. Type *"tired cat"* and get the cat stickers — even if you have
+4,000 stickers across hundreds of packs and never tagged a single one.
 
 ```
 You → bot: "tired cat"
-Bot → you: [top 10 matching stickers / GIFs]
+Bot → you: [the matching stickers, each with a button to open its pack]
 ```
 
-Works for any language. Search quality depends on the chosen [embedding model](#embedding-models).
+100% local and private: it runs on your machine and the only network traffic is
+the normal Telegram API. Your stickers are never uploaded anywhere or used to
+train anything.
+
+> 🔍 Works in **any language** (Russian, Chinese, English, …) — quality depends
+> on the chosen [embedding model](#embedding-models).
+
+<!-- Tip: add a demo.gif here, e.g.  ![demo](docs/demo.gif) -->
+
+### Features
+
+- 🧠 **Semantic search** over stickers, favorites, recents and saved GIFs
+- 🌍 **Multilingual** queries out of the box (SigLIP2 default)
+- 🔒 **Private** — local index, owner-only bot, session never leaves your disk
+- 🔄 **Incremental** — re-`sync` only processes new stickers
+- 🔌 **Swappable models** — one line in `.env`, from 0.2 GB to 7 GB
+- 👤 **Multiple accounts** via named profiles
+- 🖥️ **Cross-platform** — Linux, macOS, Windows
 
 ---
 
@@ -19,7 +39,7 @@ Works for any language. Search quality depends on the chosen [embedding model](#
 2. Each sticker / GIF is downloaded locally and preview frames are extracted.
 3. A CLIP-style multimodal model encodes every frame as a vector.
 4. When you send a text query to your private bot, the same model encodes the text and finds the closest frames by cosine similarity.
-5. The bot sends the top results as real Telegram stickers and animations.
+5. The bot sends the top results as real Telegram stickers — each with a button that opens its sticker pack.
 
 Everything runs on your machine. No data leaves except standard Telegram API calls.
 
@@ -29,17 +49,24 @@ Everything runs on your machine. No data leaves except standard Telegram API cal
 
 | Dependency | Notes |
 |---|---|
-| Python 3.11+ | |
-| [ffmpeg](https://ffmpeg.org/download.html) | Must be in `PATH` |
-| ~500 MB RAM | For the default model |
+| Python 3.11+ | 3.12 recommended |
+| [ffmpeg](https://ffmpeg.org/download.html) | Must be in `PATH` (used for animated/video stickers) |
+| ~1 GB RAM | For the default model on CPU |
 | A Telegram account | With sticker packs installed |
+
+Runs on **Linux, macOS, and Windows**. On Windows, use PowerShell or Windows
+Terminal (for clean QR rendering) and make sure `ffmpeg` is on your `PATH`.
+
+A GPU is **optional**: if you install a CUDA build of PyTorch, embedding is used
+on the GPU automatically. Plain CPU is fine for one-time indexing of a few
+thousand stickers.
 
 ---
 
 ## Install
 
 ```bash
-git clone https://github.com/golov-j/StickerRadar.git
+git clone https://github.com/GolovIaroslav/StickerRadar.git
 cd StickerRadar
 
 # Recommended: uv (fast)
