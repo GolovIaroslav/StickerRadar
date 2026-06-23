@@ -20,14 +20,16 @@ from telethon.tl.types import (
     DocumentAttributeSticker,
     DocumentAttributeVideo,
     InputStickerSetID,
-    MessagesSavedGifs,
-    MessagesSavedGifsNotModified,
-    MessagesAllStickers,
-    MessagesAllStickersNotModified,
-    MessagesFavedStickers,
-    MessagesFavedStickersNotModified,
-    MessagesRecentStickers,
-    MessagesRecentStickersNotModified,
+)
+from telethon.tl.types.messages import (
+    SavedGifs as MessagesSavedGifs,
+    SavedGifsNotModified as MessagesSavedGifsNotModified,
+    AllStickers as MessagesAllStickers,
+    AllStickersNotModified as MessagesAllStickersNotModified,
+    FavedStickers as MessagesFavedStickers,
+    FavedStickersNotModified as MessagesFavedStickersNotModified,
+    RecentStickers as MessagesRecentStickers,
+    RecentStickersNotModified as MessagesRecentStickersNotModified,
 )
 
 from app.errors import DownloadError
