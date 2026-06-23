@@ -232,18 +232,23 @@ class TgUserClient:
         """Download a Telegram document to dest_path. Returns dest_path."""
         from telethon.tl.types import InputDocument
 
+        from telethon.tl.types import InputDocumentFileLocation
+
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            await self._client.download_media(
-                InputDocument(
+            await self._client.download_file(
+                InputDocumentFileLocation(
                     id=int(tg_document_id),
                     access_hash=int(access_hash),
                     file_reference=file_reference,
+                    thumb_size="",
                 ),
                 file=str(dest_path),
             )
         except Exception as e:
             raise DownloadError(f"Failed to download {tg_document_id}: {e}") from e
+        if not dest_path.exists():
+            raise DownloadError(f"Download produced no file for {tg_document_id}")
         return dest_path
 
     async def keepalive(self) -> None:

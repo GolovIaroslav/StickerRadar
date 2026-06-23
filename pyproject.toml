@@ -29,6 +29,8 @@ dependencies = [
     "numpy>=1.24",
     "python-dotenv>=1.0",
     "aiofiles>=23.0",
+    "qrcode>=8.2",
+    "rich>=13.0",
 ]
 
 [project.optional-dependencies]

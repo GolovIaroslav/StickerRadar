@@ -41,12 +41,14 @@ async def cmd_help(message: Message) -> None:
         return
     await message.answer(
         "Example queries:\n"
-        "  кот устал\n"
-        "  я устал\n"
-        "  радость\n"
-        "  злой\n"
-        "  обнимаю\n\n"
-        "Any text message is treated as a search query."
+        "  laughing\n"
+        "  tired\n"
+        "  happy\n"
+        "  angry\n"
+        "  hug\n"
+        "  sad cat\n\n"
+        "Any text message is treated as a search query.\n"
+        "Queries in any language work — quality depends on the embedding model."
     )
 
 
@@ -66,34 +68,54 @@ async def cmd_status(message: Message) -> None:
 
 
 @router.message(Command("sync"))
-async def cmd_sync(message: Message, bot: Bot) -> None:
+async def cmd_sync(message: Message, bot: Bot, tg_client) -> None:
     if not _owner_only(message):
         return
-    await message.answer("Starting full sync (metadata + download + preview + embed)…")
+
+    status_msg = await message.answer("Sync started…")
+
+    async def update(text: str) -> None:
+        try:
+            await status_msg.edit_text(text)
+        except Exception:
+            pass
+
     loop = asyncio.get_event_loop()
     try:
-        await loop.run_in_executor(None, _run_full_sync)
-        counts = db.get_status_counts()
-        await message.answer(
+        from app.scanner import _run_metadata_sync, _run_download, _run_preview, _run_embed
+
+        await update("Syncing metadata…")
+        await _run_metadata_sync(None, client=tg_client)
+        c = db.get_status_counts()
+        await update(f"Metadata: {c['total']} items\nDownloading files…")
+
+        await _run_download(None, client=tg_client)
+        c = db.get_status_counts()
+        await update(
+            f"Metadata: {c['total']} items\n"
+            f"Downloaded: {c['downloaded']}\n"
+            f"Extracting previews…"
+        )
+
+        await loop.run_in_executor(None, _run_preview, None)
+        c = db.get_status_counts()
+        await update(
+            f"Metadata: {c['total']} items\n"
+            f"Downloaded: {c['downloaded']}  Previewed: {c['previewed']}\n"
+            f"Building embeddings…"
+        )
+
+        await loop.run_in_executor(None, _run_embed, None)
+        c = db.get_status_counts()
+        await update(
             f"Sync complete.\n"
-            f"  Total:    {counts['total']}\n"
-            f"  Embedded: {counts['embedded']}\n"
-            f"  Failed:   {counts['failed']}"
+            f"  Total:    {c['total']}\n"
+            f"  Embedded: {c['embedded']}\n"
+            f"  Failed:   {c['failed']}"
         )
     except Exception as e:
         log.exception("Sync failed")
-        await message.answer(f"Sync failed: {e}")
-
-
-def _run_full_sync() -> None:
-    """Runs the full scanner pipeline synchronously (called in executor)."""
-    import asyncio as _asyncio
-    from app.scanner import _run_metadata_sync, _run_download, _run_preview, _run_embed
-
-    _asyncio.run(_run_metadata_sync(None))
-    _asyncio.run(_run_download(None))
-    _run_preview(None)
-    _run_embed(None)
+        await update(f"Sync failed: {e}")
 
 
 @router.message()

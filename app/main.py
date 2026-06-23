@@ -43,7 +43,7 @@ async def _run() -> None:
 
     async with tg:
         await asyncio.gather(
-            dp.start_polling(bot, handle_signals=False),
+            dp.start_polling(bot, handle_signals=False, tg_client=tg),
             tg.keepalive(),
         )
 

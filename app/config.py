@@ -59,6 +59,9 @@ TG_API_HASH: str = _require("TG_API_HASH")
 BOT_TOKEN: str = _require("BOT_TOKEN")
 OWNER_USER_ID: int = int(_require("OWNER_USER_ID"))
 
+# Override image model separately (only needed for custom dual-model setups)
+IMAGE_MODEL_NAME: str = _str("IMAGE_MODEL_NAME", "")
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -86,8 +89,8 @@ MODEL_NAME: str = _str(
 # ---------------------------------------------------------------------------
 
 TOP_K: int = _int("TOP_K", 10)
-FRAME_COUNT: int = _int("FRAME_COUNT", 3)
-SCAN_CONCURRENCY: int = _int("SCAN_CONCURRENCY", 2)
+FRAME_COUNT: int = _int("FRAME_COUNT", 5)
+SCAN_CONCURRENCY: int = _int("SCAN_CONCURRENCY", 4)
 BOT_SEND_DELAY_MS: int = _int("BOT_SEND_DELAY_MS", 250)
 
 # ---------------------------------------------------------------------------
@@ -117,6 +120,13 @@ def ensure_dirs() -> None:
     ]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
+
+
+def set_profile(name: str) -> None:
+    """Switch active session/DB to the named profile. Call before db.get_conn()."""
+    global SESSION_PATH, DB_PATH
+    SESSION_PATH = (DATA_DIR / "sessions" / name).resolve()
+    DB_PATH = (DATA_DIR / f"{name}.sqlite").resolve()
 
 
 def check_ffmpeg() -> str | None:

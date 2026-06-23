@@ -60,48 +60,44 @@ def _upsert_gif(doc: GifDoc) -> None:
     )
 
 
-async def _run_metadata_sync(limit: int | None) -> None:
+async def _run_metadata_sync(limit: int | None, client: TgUserClient | None = None) -> None:
     config.ensure_dirs()
     db.get_conn()
 
-    async with TgUserClient(config.TG_API_ID, config.TG_API_HASH, config.SESSION_PATH) as client:
-        # ── installed packs ────────────────────────────────────────────────
-        sets = await client.get_installed_sticker_sets()
+    async def _sync(c: TgUserClient) -> None:
+        sets = await c.get_installed_sticker_sets()
         if limit is not None:
             sets = sets[:limit]
-
-        total_sets = len(sets)
-        sticker_count = 0
-
         for i, set_meta in enumerate(sets, start=1):
-            print(f"Pack {i}/{total_sets}: {set_meta.title!r} ({set_meta.count} stickers)")
-            docs = await client.get_sticker_set_documents(set_meta)
+            print(f"Pack {i}/{len(sets)}: {set_meta.title!r} ({set_meta.count} stickers)")
+            docs = await c.get_sticker_set_documents(set_meta)
             for doc in docs:
                 _upsert_sticker(doc, is_installed=True)
-                sticker_count += 1
 
-        # ── favorites ─────────────────────────────────────────────────────
         print("Syncing favorite stickers…")
-        favs = await client.get_favorite_stickers()
+        favs = await c.get_favorite_stickers()
         for doc in favs:
             _upsert_sticker(doc, is_favorite=True)
         print(f"  {len(favs)} favorites synced")
 
-        # ── recents ───────────────────────────────────────────────────────
         print("Syncing recent stickers…")
-        recents = await client.get_recent_stickers()
+        recents = await c.get_recent_stickers()
         for doc in recents:
             _upsert_sticker(doc, is_recent=True)
         print(f"  {len(recents)} recents synced")
 
-        # ── saved GIFs ────────────────────────────────────────────────────
         print("Syncing saved GIFs…")
-        gifs = await client.get_saved_gifs()
+        gifs = await c.get_saved_gifs()
         for doc in gifs:
             _upsert_gif(doc)
         print(f"  {len(gifs)} GIFs synced")
 
-    # ── summary ───────────────────────────────────────────────────────────
+    if client is not None:
+        await _sync(client)
+    else:
+        async with TgUserClient(config.TG_API_ID, config.TG_API_HASH, config.SESSION_PATH) as c:
+            await _sync(c)
+
     counts = db.get_status_counts()
     print("\n── Sync complete ──────────────────────────────")
     print(f"  Total media items : {counts['total']}")
@@ -112,7 +108,7 @@ async def _run_metadata_sync(limit: int | None) -> None:
     print("───────────────────────────────────────────────")
 
 
-async def _run_download(limit: int | None) -> None:
+async def _run_download(limit: int | None, client: TgUserClient | None = None) -> None:
     config.ensure_dirs()
     db.get_conn()
 
@@ -124,14 +120,21 @@ async def _run_download(limit: int | None) -> None:
         return
 
     sem = asyncio.Semaphore(config.SCAN_CONCURRENCY)
-    async with TgUserClient(config.TG_API_ID, config.TG_API_HASH, config.SESSION_PATH) as client:
+
+    async def _download(c: TgUserClient) -> None:
         tasks = [
             media_store.download_one(
-                client, row, sem, label=f"File {i}/{total}: {row['tg_document_id']}"
+                c, row, sem, label=f"File {i}/{total}: {row['tg_document_id']}"
             )
             for i, row in enumerate(rows, start=1)
         ]
         await asyncio.gather(*tasks)
+
+    if client is not None:
+        await _download(client)
+    else:
+        async with TgUserClient(config.TG_API_ID, config.TG_API_HASH, config.SESSION_PATH) as c:
+            await _download(c)
 
     _print_counts()
 
@@ -151,31 +154,65 @@ def _run_embed(limit: int | None) -> None:
     from pathlib import Path
 
     embedder = Embedder()
+    batch_size = 32
 
-    for i, row in enumerate(rows, start=1):
+    # Build a flat list of (media_id, frame_row) for batch encoding
+    pending: list[tuple[int, object]] = []
+    skip_ids: list[int] = []
+
+    for row in rows:
         media_id = row["id"]
-        print(f"Embed {i}/{total}: {row['tg_document_id']}")
-        try:
-            frames = db.list_frames_for_media(media_id)
-            if not frames:
-                db.mark_embed_failed(media_id, "no frames")
-                print("  SKIP: no frames")
-                continue
+        frames = db.list_frames_for_media(media_id)
+        if not frames:
+            db.mark_embed_failed(media_id, "no frames")
+            skip_ids.append(media_id)
+        else:
             for frame in frames:
-                path = Path(frame["preview_path"])
-                if not path.exists():
-                    raise FileNotFoundError(f"Preview missing: {path}")
-                vec = embedder.embed_image(path)
-                db.upsert_frame_embedding(
-                    frame_id=frame["id"],
-                    model_name=embedder.model_name,
-                    dim=len(vec),
-                    vector_bytes=vec.tobytes(),
-                )
-            db.mark_embed_ok(media_id)
+                pending.append((media_id, frame))
+
+    done = len(skip_ids)
+    print(f"Embedding {total - len(skip_ids)} items ({len(pending)} frames) …")
+
+    # Process in batches
+    for batch_start in range(0, len(pending), batch_size):
+        batch = pending[batch_start: batch_start + batch_size]
+        paths = []
+        valid = []
+        for media_id, frame in batch:
+            p = Path(frame["preview_path"])
+            if p.exists():
+                paths.append(p)
+                valid.append((media_id, frame))
+            else:
+                db.mark_embed_failed(media_id, f"Preview missing: {p.name}")
+
+        if not paths:
+            continue
+
+        try:
+            vecs = embedder.embed_images(paths)
         except Exception as exc:
-            db.mark_embed_failed(media_id, str(exc)[:200])
-            print(f"  ERROR: {exc}")
+            for media_id, _ in valid:
+                db.mark_embed_failed(media_id, str(exc)[:200])
+            print(f"  BATCH ERROR: {exc}")
+            continue
+
+        media_frames: dict[int, list] = {}
+        for (media_id, frame), vec in zip(valid, vecs):
+            db.upsert_frame_embedding(
+                frame_id=frame["id"],
+                model_name=embedder.model_name,
+                dim=len(vec),
+                vector_bytes=vec.tobytes(),
+            )
+            media_frames.setdefault(media_id, []).append(True)
+
+        for media_id in media_frames:
+            db.mark_embed_ok(media_id)
+
+        done_in_batch = len(set(m for m, _ in valid))
+        done += done_in_batch
+        print(f"  Embedded {done}/{total} …")
 
     _print_counts()
 

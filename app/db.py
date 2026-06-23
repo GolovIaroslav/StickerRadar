@@ -310,6 +310,32 @@ def upsert_frame_embedding(
     conn.commit()
 
 
+def reset_embed_status() -> int:
+    """Reset embed_status to 'pending' for all embedded items. Returns count."""
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE media_items SET embed_status='pending', updated_at=CURRENT_TIMESTAMP "
+        "WHERE embed_status='ok'"
+    )
+    conn.execute(
+        "UPDATE media_items SET embed_status='pending', updated_at=CURRENT_TIMESTAMP "
+        "WHERE embed_status='failed'"
+    )
+    conn.commit()
+    return conn.execute("SELECT COUNT(*) FROM media_items WHERE embed_status='pending'").fetchone()[0]
+
+
+def reset_preview_status() -> int:
+    """Reset preview_status and embed_status to 'pending'. Used for full reindex."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE media_items SET preview_status='pending', embed_status='pending', "
+        "updated_at=CURRENT_TIMESTAMP WHERE download_status='ok'"
+    )
+    conn.commit()
+    return conn.execute("SELECT COUNT(*) FROM media_items WHERE preview_status='pending'").fetchone()[0]
+
+
 def list_pending_downloads(limit: int = 100) -> list[sqlite3.Row]:
     return get_conn().execute(
         "SELECT * FROM media_items WHERE download_status='pending' LIMIT ?", (limit,)

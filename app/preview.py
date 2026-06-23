@@ -22,8 +22,14 @@ from PIL import Image
 
 from app import config, db
 
-_FRAME_POSITIONS = [0.2, 0.5, 0.8]
 _BG = (255, 255, 255)
+
+
+def _frame_positions(n: int) -> list[float]:
+    """Return n evenly-spaced positions in (0, 1). n=1 → [0.5], n=5 → [0.1…0.9]."""
+    if n <= 1:
+        return [0.5]
+    return [(i + 0.5) / n for i in range(n)]
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +102,9 @@ def _extract_video(row: sqlite3.Row, ffmpeg: str) -> list[tuple[float, Path]]:
     out_dir = _preview_dir(row["id"])
     duration = _probe_duration(src)
 
+    positions = _frame_positions(config.FRAME_COUNT)
     results: list[tuple[float, Path]] = []
-    for i, pos in enumerate(_FRAME_POSITIONS):
+    for i, pos in enumerate(positions):
         out = out_dir / f"frame_{i:03d}.png"
         ts = (duration * pos) if duration else 0.0
         cmd = [
@@ -139,8 +146,9 @@ def _extract_tgs_rlottie(row: sqlite3.Row) -> list[tuple[float, Path]] | None:
         if n <= 0:
             return None
         w, h = anim.lottie_animation_get_size()
+        positions = _frame_positions(config.FRAME_COUNT)
         results: list[tuple[float, Path]] = []
-        for i, pos in enumerate(_FRAME_POSITIONS):
+        for i, pos in enumerate(positions):
             fidx = max(0, min(int(pos * n), n - 1))
             out = out_dir / f"frame_{i:03d}.png"
             buf = anim.lottie_animation_render(fidx, w, h)
