@@ -1,8 +1,9 @@
 """
-app/scanner.py — metadata sync without downloading files.
+app/scanner.py — metadata sync and media downloads.
 
 Usage:
     python -m app.scanner --metadata-only [--limit N]
+    python -m app.scanner --download [--limit N]
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import argparse
 import asyncio
 import sys
 
-from app import config, db
+from app import config, db, media_store
 from app.tg_user import GifDoc, StickerDoc, TgUserClient
 
 
@@ -110,25 +111,68 @@ async def _run_metadata_sync(limit: int | None) -> None:
     print("───────────────────────────────────────────────")
 
 
+async def _run_download(limit: int | None) -> None:
+    config.ensure_dirs()
+    db.get_conn()
+
+    rows = db.list_pending_downloads(limit if limit is not None else 10 ** 9)
+    total = len(rows)
+    if not total:
+        print("No pending downloads.")
+        _print_counts()
+        return
+
+    sem = asyncio.Semaphore(config.SCAN_CONCURRENCY)
+    async with TgUserClient(config.TG_API_ID, config.TG_API_HASH, config.SESSION_PATH) as client:
+        tasks = [
+            media_store.download_one(
+                client, row, sem, label=f"File {i}/{total}: {row['tg_document_id']}"
+            )
+            for i, row in enumerate(rows, start=1)
+        ]
+        await asyncio.gather(*tasks)
+
+    _print_counts()
+
+
+def _print_counts() -> None:
+    counts = db.get_status_counts()
+    print("\n── Status ──────────────────────────────────────")
+    print(f"  Total         : {counts['total']}")
+    print(f"  Downloaded    : {counts['downloaded']}")
+    print(f"  Previewed     : {counts['previewed']}")
+    print(f"  Embedded      : {counts['embedded']}")
+    print(f"  Failed        : {counts['failed']}")
+    print("────────────────────────────────────────────────")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="StickerRadar scanner")
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--metadata-only",
         action="store_true",
-        required=True,
         help="Sync metadata only (no file downloads)",
+    )
+    group.add_argument(
+        "--download",
+        action="store_true",
+        help="Download pending media files",
     )
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
         metavar="N",
-        help="Process only the first N installed packs (useful for testing)",
+        help="Process only the first N items",
     )
     args = parser.parse_args()
 
     try:
-        asyncio.run(_run_metadata_sync(args.limit))
+        if args.metadata_only:
+            asyncio.run(_run_metadata_sync(args.limit))
+        else:
+            asyncio.run(_run_download(args.limit))
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(0)
