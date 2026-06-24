@@ -40,6 +40,24 @@ def _is_oom(exc: Exception) -> bool:
     return "out of memory" in str(exc).lower() or "CUDA out of memory" in str(exc)
 
 
+def _params_to_count(params: str) -> float | None:
+    """Parse a params string like '2B', '~0.95B', '~99M' into a number, or None."""
+    import re
+    m = re.search(r"([\d.]+)\s*([BM])", params or "", re.IGNORECASE)
+    if not m:
+        return None
+    n = float(m.group(1))
+    return n * (1e9 if m.group(2).upper() == "B" else 1e6)
+
+
+def _estimate_vram_gb(params: str) -> float | None:
+    """Rough GPU memory need in fp16 (2 bytes/param) plus ~30% overhead, in GB."""
+    n = _params_to_count(params)
+    if n is None:
+        return None
+    return (n * 2 / 1e9) * 1.3
+
+
 # ---------------------------------------------------------------------------
 # Backends
 # ---------------------------------------------------------------------------
@@ -103,12 +121,17 @@ class _STBackend:
         kw = {"device": device}
         if trust_remote_code:
             kw["trust_remote_code"] = True
-        print(f"Loading text model: {text_model}  (sentence-transformers, device={device})")
+        if device == "cuda":
+            # Half precision halves VRAM use, so 2B+ models fit on smaller GPUs.
+            import torch
+            kw["model_kwargs"] = {"torch_dtype": torch.float16}
+        dt = "fp16" if device == "cuda" else "fp32"
+        print(f"Loading text model: {text_model}  (sentence-transformers, device={device}, {dt})")
         self.text = SentenceTransformer(text_model, **kw)
         if image_model == text_model:
             self.img = self.text
         else:
-            print(f"Loading image model: {image_model}  (sentence-transformers, device={device})")
+            print(f"Loading image model: {image_model}  (sentence-transformers, device={device}, {dt})")
             self.img = SentenceTransformer(image_model, **kw)
 
     def encode_images(self, images: list[Image.Image]) -> np.ndarray:
@@ -177,18 +200,18 @@ class Embedder:
         return config.MODEL_NAME
 
     @staticmethod
-    def _warn_if_low_vram() -> None:
-        """Print free GPU memory and warn if a large model is unlikely to fit."""
+    def _warn_if_low_vram(needed_gb: float | None) -> None:
+        """Print free GPU memory and warn only if the model likely won't fit."""
         try:
             import torch
             free, total = torch.cuda.mem_get_info()
             free_gb, total_gb = free / 1e9, total / 1e9
             print(f"GPU memory: {free_gb:.1f} GB free / {total_gb:.1f} GB total")
-            if free_gb < 6.0:
+            if needed_gb and free_gb < needed_gb:
                 print(
-                    f"⚠  Only {free_gb:.1f} GB free on the GPU. Large models (2B+) may not fit\n"
-                    "   and will fall back to CPU. To avoid the failed attempt, set DEVICE=cpu\n"
-                    "   in .env, or use a smaller model (python -m app models)."
+                    f"   Model needs ~{needed_gb:.1f} GB (fp16) but only {free_gb:.1f} GB is free.\n"
+                    "   If it runs out of memory it will fall back to CPU. To skip the GPU\n"
+                    "   attempt, set DEVICE=cpu in .env, or pick a smaller model (python -m app models)."
                 )
         except Exception:
             pass
@@ -215,7 +238,9 @@ class Embedder:
 
         device = _resolve_device(config.DEVICE)
         if device == "cuda":
-            self._warn_if_low_vram()
+            from app.models import get as registry_get
+            entry = registry_get(config.MODEL_NAME)
+            self._warn_if_low_vram(_estimate_vram_gb(entry.params) if entry else None)
         try:
             self._backend = self._build(device)
         except Exception as exc:
