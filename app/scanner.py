@@ -150,11 +150,11 @@ def _run_embed(limit: int | None, keep_previews: bool = False) -> None:
         _print_counts()
         return
 
-    from app.embeddings import Embedder
+    from app.embeddings import get_shared_embedder
     from app.preview import delete_previews
     from pathlib import Path
 
-    embedder = Embedder()
+    embedder = get_shared_embedder()
     print(f"Embedding {total} items …")
 
     done = 0

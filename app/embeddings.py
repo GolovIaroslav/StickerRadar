@@ -30,10 +30,16 @@ def _l2(arr: np.ndarray) -> np.ndarray:
 
 def _resolve_device(pref: str | None) -> str:
     pref = (pref or "auto").lower()
-    if pref in ("cpu", "cuda"):
-        return pref
     import torch
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    available = torch.cuda.is_available()
+    if pref == "cpu":
+        return "cpu"
+    if pref == "cuda":
+        if not available:
+            print("DEVICE=cuda but no CUDA GPU detected — using CPU.")
+            return "cpu"
+        return "cuda"
+    return "cuda" if available else "cpu"
 
 
 def _is_oom(exc: Exception) -> bool:
@@ -286,3 +292,16 @@ class Embedder:
 
     def embed_text(self, text: str) -> np.ndarray:
         return self._get().encode_text([text])[0]
+
+
+# A single shared instance so the model is loaded only ONCE per process
+# (the bot does both /sync embedding and search — without this it would load
+# the model twice and can run out of memory).
+_shared: Embedder | None = None
+
+
+def get_shared_embedder() -> Embedder:
+    global _shared
+    if _shared is None:
+        _shared = Embedder()
+    return _shared

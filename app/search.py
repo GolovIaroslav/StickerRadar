@@ -11,14 +11,9 @@ import numpy as np
 from app import config, db
 from app.embeddings import Embedder
 
-_embedder: Embedder | None = None
-
-
 def _get_embedder() -> Embedder:
-    global _embedder
-    if _embedder is None:
-        _embedder = Embedder()
-    return _embedder
+    from app.embeddings import get_shared_embedder
+    return get_shared_embedder()
 
 
 @dataclass
