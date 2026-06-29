@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,8 @@ CREATE TABLE IF NOT EXISTS media_items (
   download_status TEXT DEFAULT 'pending',  -- pending | ok | failed
   preview_status  TEXT DEFAULT 'pending',
   embed_status    TEXT DEFAULT 'pending',
+  ocr_status      TEXT DEFAULT 'pending',
+  ocr_text        TEXT,                    -- aggregated normalized OCR text from all frames
   last_error      TEXT,
 
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -91,32 +94,110 @@ CREATE INDEX IF NOT EXISTS idx_media_set        ON media_items(set_short_name);
 CREATE INDEX IF NOT EXISTS idx_media_dl_status  ON media_items(download_status);
 CREATE INDEX IF NOT EXISTS idx_media_prev_status ON media_items(preview_status);
 CREATE INDEX IF NOT EXISTS idx_media_emb_status ON media_items(embed_status);
+CREATE INDEX IF NOT EXISTS idx_media_ocr_status ON media_items(ocr_status);
 CREATE INDEX IF NOT EXISTS idx_frame_emb_model  ON frame_embeddings(model_name);
+
+-- FTS5 full-text index over sticker metadata for hybrid BM25+vector search.
+CREATE VIRTUAL TABLE IF NOT EXISTS media_fts USING fts5(
+    set_title, set_short_name, emoji,
+    content=media_items,
+    content_rowid=id
+);
+
+CREATE TRIGGER IF NOT EXISTS media_fts_ai AFTER INSERT ON media_items BEGIN
+    INSERT INTO media_fts(rowid, set_title, set_short_name, emoji)
+    VALUES (new.id, new.set_title, new.set_short_name, new.emoji);
+END;
+
+CREATE TRIGGER IF NOT EXISTS media_fts_ad AFTER DELETE ON media_items BEGIN
+    INSERT INTO media_fts(media_fts, rowid, set_title, set_short_name, emoji)
+    VALUES ('delete', old.id, old.set_title, old.set_short_name, old.emoji);
+END;
+
+CREATE TRIGGER IF NOT EXISTS media_fts_au AFTER UPDATE ON media_items BEGIN
+    INSERT INTO media_fts(media_fts, rowid, set_title, set_short_name, emoji)
+    VALUES ('delete', old.id, old.set_title, old.set_short_name, old.emoji);
+    INSERT INTO media_fts(rowid, set_title, set_short_name, emoji)
+    VALUES (new.id, new.set_title, new.set_short_name, new.emoji);
+END;
+
+-- OCR text per preview frame.
+CREATE TABLE IF NOT EXISTS frame_ocr (
+  frame_id   INTEGER PRIMARY KEY REFERENCES media_frames(id) ON DELETE CASCADE,
+  raw_text   TEXT NOT NULL DEFAULT '',
+  norm_text  TEXT NOT NULL DEFAULT '',
+  confidence REAL NOT NULL DEFAULT 0.0
+);
+
+-- Separate FTS5 for OCR text — kept separate from media_fts so no migration
+-- of the existing metadata index is needed when adding this feature.
+CREATE VIRTUAL TABLE IF NOT EXISTS media_ocr_fts USING fts5(
+    ocr_text,
+    content=media_items,
+    content_rowid=id
+);
+
+CREATE TRIGGER IF NOT EXISTS ocr_fts_ai AFTER INSERT ON media_items BEGIN
+    INSERT INTO media_ocr_fts(rowid, ocr_text) VALUES (new.id, new.ocr_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS ocr_fts_au AFTER UPDATE OF ocr_text ON media_items BEGIN
+    INSERT INTO media_ocr_fts(media_ocr_fts, rowid, ocr_text)
+        VALUES ('delete', old.id, old.ocr_text);
+    INSERT INTO media_ocr_fts(rowid, ocr_text) VALUES (new.id, new.ocr_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS ocr_fts_ad AFTER DELETE ON media_items BEGIN
+    INSERT INTO media_ocr_fts(media_ocr_fts, rowid, ocr_text)
+        VALUES ('delete', old.id, old.ocr_text);
+END;
 """
 
 # ---------------------------------------------------------------------------
-# Connection
+# Connection — one connection per thread (WAL allows concurrent readers)
 # ---------------------------------------------------------------------------
 
-_conn: sqlite3.Connection | None = None
+_local = threading.local()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns/tables introduced after the initial schema — idempotent."""
+    tbl = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_items'"
+    ).fetchone()
+    if tbl is None:
+        return  # fresh DB — _SCHEMA will create everything with all columns
+
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(media_items)")}
+    changed = False
+    if "ocr_status" not in existing:
+        conn.execute("ALTER TABLE media_items ADD COLUMN ocr_status TEXT DEFAULT 'pending'")
+        changed = True
+    if "ocr_text" not in existing:
+        conn.execute("ALTER TABLE media_items ADD COLUMN ocr_text TEXT")
+        changed = True
+    if changed:
+        conn.commit()
 
 
 def get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
+    conn: sqlite3.Connection | None = getattr(_local, "conn", None)
+    if conn is None:
         config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(config.DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.executescript(_SCHEMA)
-        _conn.commit()
-    return _conn
+        conn = sqlite3.connect(str(config.DB_PATH))
+        conn.row_factory = sqlite3.Row
+        _migrate(conn)  # add new columns to existing DBs before schema runs
+        conn.executescript(_SCHEMA)  # idempotent — CREATE TABLE IF NOT EXISTS
+        conn.commit()
+        _local.conn = conn
+    return conn
 
 
 def close() -> None:
-    global _conn
-    if _conn:
-        _conn.close()
-        _conn = None
+    conn: sqlite3.Connection | None = getattr(_local, "conn", None)
+    if conn:
+        conn.close()
+        _local.conn = None
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +404,7 @@ def mark_items_for_model(model_name: str) -> int:
     conn = get_conn()
     rows = conn.execute(
         """
-        SELECT id FROM media_items
+        SELECT id, local_path FROM media_items
         WHERE download_status='ok'
           AND id NOT IN (
             SELECT DISTINCT mf.media_id
@@ -335,6 +416,7 @@ def mark_items_for_model(model_name: str) -> int:
         (model_name,),
     ).fetchall()
 
+    redownload = 0
     for r in rows:
         media_id = r["id"]
         frames = conn.execute(
@@ -348,13 +430,28 @@ def mark_items_for_model(model_name: str) -> int:
                 (media_id,),
             )
         else:
-            # Frames missing (new item, or deleted after a previous embed) — regenerate.
-            conn.execute(
-                "UPDATE media_items SET preview_status='pending', embed_status='pending', "
-                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (media_id,),
-            )
+            local_path = r["local_path"]
+            media_gone = not local_path or not Path(local_path).exists()
+            if media_gone:
+                # Media was pruned before re-embedding — must re-download first.
+                conn.execute(
+                    "UPDATE media_items SET download_status='pending', preview_status='pending', "
+                    "embed_status='pending', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (media_id,),
+                )
+                redownload += 1
+            else:
+                # Frames missing but file exists — regenerate previews.
+                conn.execute(
+                    "UPDATE media_items SET preview_status='pending', embed_status='pending', "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (media_id,),
+                )
     conn.commit()
+    if redownload:
+        print(
+            f"  {redownload} item(s) need re-download (media pruned before model switch)."
+        )
     return len(rows)
 
 
@@ -421,6 +518,88 @@ def list_pending_embeddings(limit: int = 100) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def upsert_frame_ocr(frame_id: int, raw_text: str, norm_text: str, confidence: float) -> None:
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO frame_ocr (frame_id, raw_text, norm_text, confidence)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(frame_id) DO UPDATE SET
+               raw_text=excluded.raw_text,
+               norm_text=excluded.norm_text,
+               confidence=excluded.confidence""",
+        (frame_id, raw_text, norm_text, confidence),
+    )
+    conn.commit()
+
+
+def mark_ocr_ok(media_id: int, ocr_text: str) -> None:
+    get_conn().execute(
+        "UPDATE media_items SET ocr_status='ok', ocr_text=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (ocr_text or None, media_id),
+    )
+    get_conn().commit()
+
+
+def mark_ocr_failed(media_id: int, error: str) -> None:
+    get_conn().execute(
+        "UPDATE media_items SET ocr_status='failed', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (error, media_id),
+    )
+    get_conn().commit()
+
+
+def list_pending_ocr(limit: int = 100) -> list[sqlite3.Row]:
+    return get_conn().execute(
+        "SELECT * FROM media_items WHERE preview_status='ok' AND ocr_status='pending' LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
+def clear_stale_source_flags(
+    installed_ids: set[str],
+    favorite_ids: set[str],
+    recent_ids: set[str],
+    saved_gif_ids: set[str],
+) -> None:
+    """
+    After a full metadata sync, clear source flags for items no longer present
+    in that source. Each flag is cleared independently so a sticker that is both
+    installed and favorited keeps its is_favorite when removed only from installed.
+    """
+    conn = get_conn()
+
+    def _clear(flag: str, seen: set[str]) -> None:
+        if seen:
+            placeholders = ",".join("?" * len(seen))
+            conn.execute(
+                f"UPDATE media_items SET {flag}=0"
+                f" WHERE {flag}=1 AND tg_document_id NOT IN ({placeholders})",
+                list(seen),
+            )
+        else:
+            conn.execute(f"UPDATE media_items SET {flag}=0 WHERE {flag}=1")
+
+    _clear("is_installed", installed_ids)
+    _clear("is_favorite", favorite_ids)
+    _clear("is_recent", recent_ids)
+    _clear("is_saved_gif", saved_gif_ids)
+    conn.commit()
+
+
+def fts_rebuild() -> None:
+    """Rebuild the FTS indexes from media_items (use after DB upgrade or bulk import)."""
+    conn = get_conn()
+    conn.execute("INSERT INTO media_fts(media_fts) VALUES('rebuild')")
+    conn.execute("INSERT INTO media_ocr_fts(media_ocr_fts) VALUES('rebuild')")
+    conn.commit()
+
+
+def delete_frames_for_media(media_id: int) -> None:
+    conn = get_conn()
+    conn.execute("DELETE FROM media_frames WHERE media_id=?", (media_id,))
+    conn.commit()
+
+
 def list_frames_for_media(media_id: int) -> list[sqlite3.Row]:
     return get_conn().execute(
         "SELECT * FROM media_frames WHERE media_id=? ORDER BY frame_index",
@@ -434,6 +613,7 @@ def get_status_counts() -> dict[str, int]:
     dl_ok = conn.execute("SELECT COUNT(*) FROM media_items WHERE download_status='ok'").fetchone()[0]
     prev_ok = conn.execute("SELECT COUNT(*) FROM media_items WHERE preview_status='ok'").fetchone()[0]
     emb_ok = conn.execute("SELECT COUNT(*) FROM media_items WHERE embed_status='ok'").fetchone()[0]
+    ocr_ok = conn.execute("SELECT COUNT(*) FROM media_items WHERE ocr_status='ok'").fetchone()[0]
     failed = conn.execute(
         "SELECT COUNT(*) FROM media_items WHERE download_status='failed' OR preview_status='failed' OR embed_status='failed'"
     ).fetchone()[0]
@@ -442,6 +622,7 @@ def get_status_counts() -> dict[str, int]:
         "downloaded": dl_ok,
         "previewed": prev_ok,
         "embedded": emb_ok,
+        "ocr": ocr_ok,
         "failed": failed,
     }
 

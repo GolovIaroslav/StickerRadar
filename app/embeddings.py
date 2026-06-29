@@ -11,6 +11,8 @@ Custom models not in the registry fall back to the "st" backend.
 """
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -77,9 +79,11 @@ class _HFBackend:
 
         self.torch = torch
         self.device = device
-        print(f"Loading model: {model_id}  (transformers, device={self.device})")
+        dtype_kw = {"torch_dtype": torch.float16} if device == "cuda" else {}
+        dt = "fp16" if device == "cuda" else "fp32"
+        print(f"Loading model: {model_id}  (transformers, device={self.device}, {dt})")
         self.model = AutoModel.from_pretrained(
-            model_id, trust_remote_code=trust_remote_code
+            model_id, trust_remote_code=trust_remote_code, **dtype_kw
         ).to(self.device).eval()
         self.processor = AutoProcessor.from_pretrained(
             model_id, trust_remote_code=trust_remote_code
@@ -199,7 +203,30 @@ class Embedder:
     """Lazily loads the active model on first use."""
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._backend = None
+        self._load_error: RuntimeError | None = None
+        self._last_use: float = 0.0
+
+    def unload(self) -> None:
+        """Release model weights from RAM/VRAM."""
+        with self._lock:
+            if self._backend is None:
+                return
+            self._backend = None
+            self._last_use = 0.0
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        print("Embedding model unloaded (idle timeout).")
+
+    def idle_seconds(self) -> float:
+        """Seconds since last embed call. Returns 0 if model is not loaded or never used."""
+        if self._backend is None or self._last_use == 0.0:
+            return 0.0
+        return time.monotonic() - self._last_use
 
     @property
     def model_name(self) -> str:
@@ -230,7 +257,24 @@ class Embedder:
             # Custom model not in registry — a Hugging Face id OR a local path.
             # Loaded via sentence-transformers; must be CLIP-style (image + text).
             image_model = config.IMAGE_MODEL_NAME or config.MODEL_NAME
-            return _STBackend(config.MODEL_NAME, image_model, True, device)
+            if not config.ALLOW_REMOTE_CODE:
+                print(
+                    f"WARNING: custom model '{config.MODEL_NAME}' may need trust_remote_code.\n"
+                    "  If loading fails, set  ALLOW_REMOTE_CODE=1  in .env.\n"
+                    "  Only do this if you trust the model's source code on HuggingFace."
+                )
+            elif config.ALLOW_REMOTE_CODE:
+                print(
+                    "WARNING: ALLOW_REMOTE_CODE=1 — model code from HuggingFace will be executed.\n"
+                    "  Ensure you trust the model repository before proceeding."
+                )
+            return _STBackend(config.MODEL_NAME, image_model, config.ALLOW_REMOTE_CODE, device)
+        if entry.trust_remote_code:
+            print(
+                f"WARNING: {entry.key} uses trust_remote_code — Python code from "
+                "the HuggingFace model repo will be executed locally.\n"
+                "  Ensure you trust this model repository before proceeding."
+            )
         if entry.loader == "hf":
             return _HFBackend(entry.key, entry.text_padding, entry.trust_remote_code, device)
         if entry.loader == "open_clip":
@@ -239,45 +283,53 @@ class Embedder:
         return _STBackend(entry.key, image_model, entry.trust_remote_code, device)
 
     def _get(self):
-        if self._backend is not None:
-            return self._backend
-
-        device = _resolve_device(config.DEVICE)
-        if device == "cuda":
-            from app.models import get as registry_get
-            entry = registry_get(config.MODEL_NAME)
-            self._warn_if_low_vram(_estimate_vram_gb(entry.params) if entry else None)
-        try:
-            self._backend = self._build(device)
-        except Exception as exc:
-            # Out of GPU memory → automatically retry on CPU.
-            if device == "cuda" and _is_oom(exc):
-                print(
-                    "\n" + "!" * 64 + "\n"
-                    "!  GPU OUT OF MEMORY — falling back to CPU (uses RAM, slower).\n"
-                    "!  Set DEVICE=cpu in .env to skip the GPU attempt next time,\n"
-                    "!  or switch to a smaller model (e.g. siglip2-base).\n"
-                    + "!" * 64 + "\n"
-                )
-                try:
-                    import torch
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-                self._backend = self._build("cpu")
+        with self._lock:
+            if self._backend is not None:
+                self._last_use = time.monotonic()
                 return self._backend
-            raise RuntimeError(
-                f"Failed to load embedding model '{config.MODEL_NAME}':\n  {exc}\n\n"
-                "It may need extra dependencies or a custom loader. Run `python -m app models`\n"
-                "for install notes, or use the verified fallback in .env:\n"
-                "  MODEL_NAME=google/siglip2-base-patch16-224"
-            ) from exc
+            if self._load_error is not None:
+                raise self._load_error
 
-        return self._backend
+            device = _resolve_device(config.DEVICE)
+            if device == "cuda":
+                from app.models import get as registry_get
+                entry = registry_get(config.MODEL_NAME)
+                self._warn_if_low_vram(_estimate_vram_gb(entry.params) if entry else None)
+            try:
+                self._backend = self._build(device)
+            except Exception as exc:
+                # Out of GPU memory → automatically retry on CPU.
+                if device == "cuda" and _is_oom(exc):
+                    print(
+                        "\n" + "!" * 64 + "\n"
+                        "!  GPU OUT OF MEMORY — falling back to CPU (uses RAM, slower).\n"
+                        "!  Set DEVICE=cpu in .env to skip the GPU attempt next time,\n"
+                        "!  or switch to a smaller model (e.g. siglip2-base).\n"
+                        + "!" * 64 + "\n"
+                    )
+                    try:
+                        import torch
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    self._backend = self._build("cpu")
+                    self._last_use = time.monotonic()
+                    return self._backend
+                self._load_error = RuntimeError(
+                    f"Failed to load embedding model '{config.MODEL_NAME}':\n  {exc}\n\n"
+                    "It may need extra dependencies or a custom loader. Run `python -m app models`\n"
+                    "for install notes, or use the verified fallback in .env:\n"
+                    "  MODEL_NAME=google/siglip2-base-patch16-224"
+                )
+                raise self._load_error from exc
+
+            self._last_use = time.monotonic()
+            return self._backend
 
     def embed_image(self, path: Path) -> np.ndarray:
         img = Image.open(path).convert("RGB")
-        return self._get().encode_images([img])[0]
+        backend = self._get()
+        return backend.encode_images([img])[0]
 
     def embed_images(self, paths: list[Path]) -> list[np.ndarray]:
         if not paths:
@@ -298,10 +350,12 @@ class Embedder:
 # (the bot does both /sync embedding and search — without this it would load
 # the model twice and can run out of memory).
 _shared: Embedder | None = None
+_shared_lock = threading.Lock()
 
 
 def get_shared_embedder() -> Embedder:
     global _shared
-    if _shared is None:
-        _shared = Embedder()
+    with _shared_lock:
+        if _shared is None:
+            _shared = Embedder()
     return _shared

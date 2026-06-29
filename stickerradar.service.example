@@ -1,0 +1,26 @@
+# StickerRadar systemd user service
+#
+# How to install:
+#   1. Copy this file to ~/.config/systemd/user/stickerradar.service
+#   2. Edit WorkingDirectory to your actual install path
+#   3. systemctl --user daemon-reload
+#   4. systemctl --user enable --now stickerradar
+#
+# View logs:  journalctl --user -u stickerradar -f
+# Stop:       systemctl --user stop stickerradar
+# Disable:    systemctl --user disable --now stickerradar
+
+[Unit]
+Description=StickerRadar Telegram bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/YOUR_USER/path/to/StickerRadar
+ExecStart=uv run python -m app run
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

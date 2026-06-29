@@ -72,16 +72,95 @@ def cmd_login(args: argparse.Namespace) -> None:
     ))
 
 
+def _interactive_sync_config() -> bool:
+    """Show settings menu before sync. Returns True to proceed, False to abort."""
+    from app import config
+    from app.models import REGISTRY
+
+    def _gpu_label() -> str:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                free, _ = torch.cuda.mem_get_info()
+                return f"GPU {free / 1e9:.1f} GB free"
+            return "CPU only"
+        except Exception:
+            return ""
+
+    while True:
+        ocr_label = (("on (gpu)" if config.OCR_USE_GPU else "on (cpu)") if config.OCR_ENABLED else "off")
+        print()
+        print("── Sync settings ──────────────────────────────────")
+        print(f"  1  Model       : {config.MODEL_NAME.split('/')[-1]}")
+        print(f"  2  Device      : {config.DEVICE}  ({_gpu_label()})")
+        print(f"  3  Frames      : {config.FRAME_COUNT}")
+        print(f"  4  Concurrency : {config.SCAN_CONCURRENCY}")
+        print(f"  5  OCR         : {ocr_label}")
+        print("────────────────────────────────────────────────────")
+
+        try:
+            choice = input("  Number to change, Enter to start, q to quit: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+        if not choice:
+            return True
+        if choice == "q":
+            return False
+
+        if choice == "1":
+            print()
+            for i, m in enumerate(REGISTRY, 1):
+                mark = "→" if m.key == config.MODEL_NAME else " "
+                print(f"  {mark} {i:2}. {m.key.split('/')[-1]:<46} {m.params:>6}  {m.quality}")
+            try:
+                sel = input("  Model number (Enter to keep): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if sel.isdigit() and 1 <= int(sel) <= len(REGISTRY):
+                config.MODEL_NAME = REGISTRY[int(sel) - 1].key
+
+        elif choice == "2":
+            opts = ["auto", "cpu", "cuda"]
+            cur = config.DEVICE if config.DEVICE in opts else "auto"
+            config.DEVICE = opts[(opts.index(cur) + 1) % len(opts)]
+
+        elif choice == "3":
+            try:
+                val = input(f"  Frames per item [{config.FRAME_COUNT}]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if val.isdigit() and int(val) >= 1:
+                config.FRAME_COUNT = int(val)
+
+        elif choice == "4":
+            try:
+                val = input(f"  Concurrency [{config.SCAN_CONCURRENCY}]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if val.isdigit() and int(val) >= 1:
+                config.SCAN_CONCURRENCY = int(val)
+
+        elif choice == "5":
+            # Cycle: off → on(cpu) → on(gpu) → off
+            if not config.OCR_ENABLED:
+                config.OCR_ENABLED = True
+                config.OCR_USE_GPU = False
+            elif not config.OCR_USE_GPU:
+                config.OCR_USE_GPU = True
+            else:
+                config.OCR_ENABLED = False
+                config.OCR_USE_GPU = False
+
+
 def cmd_sync(args: argparse.Namespace) -> None:
     from app import config, db
     _apply_profile(args)
-    config.ensure_dirs()
-    db.get_conn()
 
     if getattr(args, "frames", None):
         config.FRAME_COUNT = args.frames
 
-    from app.scanner import _run_metadata_sync, _run_download, _run_preview, _run_embed
+    from app.scanner import _run_metadata_sync, _run_download, _run_preview, _run_ocr, _run_embed
 
     keep_previews = getattr(args, "keep_previews", False)
     limit = getattr(args, "limit", None)
@@ -91,6 +170,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
         getattr(args, "preview", False),
         getattr(args, "embed", False),
     ])
+
+    if run_all and not getattr(args, "yes", False):
+        if not _interactive_sync_config():
+            return
+
+    config.ensure_dirs()
+    db.get_conn()
 
     if getattr(args, "reindex", False):
         n = db.force_reindex()
@@ -111,6 +197,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
         if run_all or getattr(args, "preview", False):
             _run_preview(limit)
+        if run_all and config.OCR_ENABLED:
+            _run_ocr(limit)
         if run_all or getattr(args, "embed", False):
             _run_embed(limit, keep_previews=keep_previews)
 
@@ -192,6 +280,18 @@ def cmd_stats(args: argparse.Namespace) -> None:
     db.get_conn()
     profile = getattr(args, "profile", None) or _read_active_profile()
     _print_stats(config, db, profile)
+    db.close()
+
+
+def cmd_fts_rebuild(args: argparse.Namespace) -> None:
+    """Rebuild the FTS5 index (needed once when upgrading from a pre-FTS build)."""
+    from app import config, db
+    _apply_profile(args)
+    db.get_conn()
+    print("Rebuilding FTS index …")
+    db.fts_rebuild()
+    count = db.get_conn().execute("SELECT COUNT(*) FROM media_fts").fetchone()[0]
+    print(f"Done. FTS index contains {count} row(s).")
     db.close()
 
 
@@ -397,6 +497,8 @@ def main() -> None:
                    help="Override FRAME_COUNT for this run")
     p.add_argument("--limit", type=int, default=None, metavar="N",
                    help="Process only the first N items per stage (for testing)")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="Skip interactive settings and start immediately")
 
     # status / stats
     sub.add_parser("status", help="Show pipeline status counts")
@@ -404,6 +506,9 @@ def main() -> None:
 
     # prune
     sub.add_parser("prune", help="Delete local media for stickers already sent once (frees disk)")
+
+    # fts-rebuild
+    sub.add_parser("fts-rebuild", help="Rebuild FTS5 full-text index (run once after upgrading)")
 
     # models
     sub.add_parser("models", help="List available embedding models and upgrade instructions")
@@ -432,6 +537,7 @@ def main() -> None:
         "status": cmd_status,
         "stats": cmd_stats,
         "prune": cmd_prune,
+        "fts-rebuild": cmd_fts_rebuild,
         "models": cmd_models,
         "session": cmd_session,
         "search": cmd_search,

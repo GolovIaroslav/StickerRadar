@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app import config, db, media_store, preview
 from app.tg_user import GifDoc, StickerDoc, TgUserClient
@@ -65,6 +66,11 @@ async def _run_metadata_sync(limit: int | None, client: TgUserClient | None = No
     db.get_conn()
 
     async def _sync(c: TgUserClient) -> None:
+        installed_ids: set[str] = set()
+        favorite_ids: set[str] = set()
+        recent_ids: set[str] = set()
+        saved_gif_ids: set[str] = set()
+
         sets = await c.get_installed_sticker_sets()
         if limit is not None:
             sets = sets[:limit]
@@ -73,24 +79,30 @@ async def _run_metadata_sync(limit: int | None, client: TgUserClient | None = No
             docs = await c.get_sticker_set_documents(set_meta)
             for doc in docs:
                 _upsert_sticker(doc, is_installed=True)
+                installed_ids.add(doc.tg_document_id)
 
         print("Syncing favorite stickers…")
         favs = await c.get_favorite_stickers()
         for doc in favs:
             _upsert_sticker(doc, is_favorite=True)
+            favorite_ids.add(doc.tg_document_id)
         print(f"  {len(favs)} favorites synced")
 
         print("Syncing recent stickers…")
         recents = await c.get_recent_stickers()
         for doc in recents:
             _upsert_sticker(doc, is_recent=True)
+            recent_ids.add(doc.tg_document_id)
         print(f"  {len(recents)} recents synced")
 
         print("Syncing saved GIFs…")
         gifs = await c.get_saved_gifs()
         for doc in gifs:
             _upsert_gif(doc)
+            saved_gif_ids.add(doc.tg_document_id)
         print(f"  {len(gifs)} GIFs synced")
+
+        db.clear_stale_source_flags(installed_ids, favorite_ids, recent_ids, saved_gif_ids)
 
     if client is not None:
         await _sync(client)
@@ -139,6 +151,64 @@ async def _run_download(limit: int | None, client: TgUserClient | None = None) -
     _print_counts()
 
 
+def _run_ocr(limit: int | None) -> None:
+    from pathlib import Path
+    from app import ocr as ocr_mod
+
+    config.ensure_dirs()
+    db.get_conn()
+
+    if not ocr_mod.is_available():
+        print("OCR skipped — easyocr not installed. To enable:  uv add easyocr")
+        return
+
+    rows = db.list_pending_ocr(limit if limit is not None else 10 ** 9)
+    total = len(rows)
+    if not total:
+        print("No pending OCR.")
+        _print_counts()
+        return
+
+    print(f"Running OCR on {total} items …")
+    done = skipped = 0
+    for i, row in enumerate(rows, start=1):
+        media_id = row["id"]
+        frames = db.list_frames_for_media(media_id)
+        if not frames:
+            db.mark_ocr_ok(media_id, "")
+            skipped += 1
+            continue
+
+        paths = [Path(f["preview_path"]) for f in frames]
+        existing = [p for p in paths if p.exists()]
+        if not existing:
+            # Previews already deleted (item was embedded before OCR was enabled).
+            db.mark_ocr_ok(media_id, "")
+            skipped += 1
+            continue
+
+        try:
+            results = ocr_mod.ocr_frames(existing)
+            norm_parts: list[str] = []
+            for frame, (raw, norm, conf) in zip(frames, results):
+                if raw:
+                    db.upsert_frame_ocr(frame["id"], raw, norm, conf)
+                if norm.strip():
+                    norm_parts.append(norm)
+            db.mark_ocr_ok(media_id, " ".join(norm_parts) if norm_parts else "")
+            done += 1
+        except Exception as exc:
+            db.mark_ocr_failed(media_id, str(exc)[:200])
+            print(f"  OCR ERROR {media_id}: {exc}")
+            continue
+
+        if i % 100 == 0 or i == total:
+            print(f"  OCR {i}/{total}  (text found: {done}, no-preview: {skipped}) …")
+
+    _print_counts()
+
+
+
 def _run_embed(limit: int | None, keep_previews: bool = False) -> None:
     config.ensure_dirs()
     db.get_conn()
@@ -155,6 +225,12 @@ def _run_embed(limit: int | None, keep_previews: bool = False) -> None:
     from pathlib import Path
 
     embedder = get_shared_embedder()
+    try:
+        embedder.embed_text("warmup")
+    except Exception as exc:
+        print(f"  Model failed to load — aborting embed run:\n  {exc}")
+        return
+
     print(f"Embedding {total} items …")
 
     done = 0
@@ -203,18 +279,40 @@ def _run_preview(limit: int | None) -> None:
     db.get_conn()
     ffmpeg = config.require_ffmpeg()
 
+    # Auto-detect FRAME_COUNT change and force a full reindex if it happened.
+    current_fc = str(config.FRAME_COUNT)
+    stored_fc = db.get_app_state("frame_count")
+    if stored_fc is not None and stored_fc != current_fc:
+        print(
+            f"FRAME_COUNT changed {stored_fc} → {current_fc}: forcing full reindex.\n"
+            "  All preview frames and embeddings will be regenerated."
+        )
+        db.force_reindex()
+
     rows = db.list_pending_previews(limit if limit is not None else 10 ** 9)
     total = len(rows)
     if not total:
         print("No pending previews.")
+        db.set_app_state("frame_count", current_fc)
         _print_counts()
         return
 
-    for i, row in enumerate(rows, start=1):
-        label = f"Preview {i}/{total}: [{row['sticker_format'] or row['mime_type']}] {row['tg_document_id']}"
-        print(label)
-        preview.extract_previews(row, ffmpeg)
+    done = 0
+    with ThreadPoolExecutor(max_workers=config.SCAN_CONCURRENCY) as pool:
+        futures = {
+            pool.submit(preview.extract_previews, row, ffmpeg): (i, row)
+            for i, row in enumerate(rows, start=1)
+        }
+        for fut in as_completed(futures):
+            i, row = futures[fut]
+            done += 1
+            fmt = row["sticker_format"] or row["mime_type"]
+            print(f"Preview {done}/{total}: [{fmt}] {row['tg_document_id']}")
+            exc = fut.exception()
+            if exc:
+                print(f"  ERROR: {exc}")
 
+    db.set_app_state("frame_count", current_fc)
     _print_counts()
 
 
@@ -248,6 +346,11 @@ def main() -> None:
         help="Extract preview frames for downloaded media",
     )
     group.add_argument(
+        "--ocr",
+        action="store_true",
+        help="Run OCR on preview frames (needs: uv add easyocr)",
+    )
+    group.add_argument(
         "--embed",
         action="store_true",
         help="Compute CLIP embeddings for preview frames",
@@ -268,6 +371,8 @@ def main() -> None:
             asyncio.run(_run_download(args.limit))
         elif args.preview:
             _run_preview(args.limit)
+        elif args.ocr:
+            _run_ocr(args.limit)
         else:
             _run_embed(args.limit)
     except KeyboardInterrupt:

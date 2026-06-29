@@ -25,16 +25,35 @@ logging.basicConfig(
 log = logging.getLogger("stickerradar")
 
 
+async def _idle_unload_task() -> None:
+    """Unload the embedding model after MODEL_IDLE_UNLOAD_SEC of inactivity."""
+    if config.MODEL_IDLE_UNLOAD_SEC <= 0:
+        return
+    try:
+        while True:
+            await asyncio.sleep(30)
+            from app.embeddings import get_shared_embedder
+            emb = get_shared_embedder()
+            idle = emb.idle_seconds()
+            if idle > 0 and idle >= config.MODEL_IDLE_UNLOAD_SEC:
+                emb.unload()
+    except asyncio.CancelledError:
+        pass
+
+
 async def _run() -> None:
     config.ensure_dirs()
 
     # Import lazily to avoid heavy startup cost when running scripts
     from app.tg_user import TgUserClient
-    from app.bot import build_dispatcher
     from aiogram import Bot
+
+    from app.bot import build_dispatcher, register_commands
 
     bot = Bot(token=config.BOT_TOKEN)
     dp = build_dispatcher()
+
+    await register_commands(bot)
 
     tg = TgUserClient(config.TG_API_ID, config.TG_API_HASH, config.SESSION_PATH)
 
@@ -45,6 +64,7 @@ async def _run() -> None:
         await asyncio.gather(
             dp.start_polling(bot, handle_signals=False, tg_client=tg),
             tg.keepalive(),
+            _idle_unload_task(),
         )
 
 

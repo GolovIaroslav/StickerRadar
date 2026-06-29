@@ -7,9 +7,9 @@ Output convention:
     data/previews/{media_id}/frame_002.png
 
 Supported formats:
-    .webp (static)  → 1 frame  (pos 0.0)
-    .tgs            → 3 frames via rlottie-python, then python-lottie CLI
-    .webm/.mp4/.gif → 3 frames via ffmpeg at pos 0.2 / 0.5 / 0.8
+    .webp (static)  → 1 frame  (pos 0.5)
+    .tgs            → FRAME_COUNT frames via rlottie-python, then python-lottie CLI
+    .webm/.mp4/.gif → FRAME_COUNT frames via ffmpeg
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from PIL import Image
 from app import config, db
 
 _BG = (255, 255, 255)
+_warned: set[str] = set()
 
 
 def _frame_positions(n: int) -> list[float]:
@@ -74,6 +75,9 @@ def _img_size(path: Path) -> tuple[int, int] | tuple[None, None]:
 def _probe_duration(src: Path) -> float | None:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
+        if "ffprobe" not in _warned:
+            _warned.add("ffprobe")
+            print("WARNING: ffprobe not found — all video frames will be extracted from t=0 (install ffprobe for correct seek positions)")
         return None
     try:
         r = subprocess.run(
@@ -128,18 +132,25 @@ def _extract_video(row: sqlite3.Row, ffmpeg: str) -> list[tuple[float, Path]]:
         ]
         try:
             subprocess.run(cmd, capture_output=True, timeout=30, check=True)
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or b"").decode(errors="replace").strip()
+            if stderr:
+                print(f"    ffmpeg [{src.name}] frame {i}: {stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            print(f"    ffmpeg [{src.name}] frame {i}: timed out")
+        if out.exists() and out.stat().st_size > 0:
             results.append((pos, out))
-        except subprocess.CalledProcessError:
+        elif i == 0:
             # fallback: first frame, no seek
-            if i == 0:
-                try:
-                    subprocess.run(
-                        [ffmpeg, "-y", "-i", str(src), "-frames:v", "1", str(out)],
-                        capture_output=True, timeout=30, check=True,
-                    )
+            try:
+                subprocess.run(
+                    [ffmpeg, "-y", "-i", str(src), "-frames:v", "1", str(out)],
+                    capture_output=True, timeout=30, check=True,
+                )
+                if out.exists() and out.stat().st_size > 0:
                     results.append((pos, out))
-                except Exception:
-                    pass
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                pass
     return results
 
 
@@ -177,7 +188,7 @@ def _extract_tgs_lottie_cli(row: sqlite3.Row) -> list[tuple[float, Path]] | None
         return None
 
     src = Path(row["local_path"])
-    out = _preview_dir(row["id"]) / "frame_001.png"
+    out = _preview_dir(row["id"]) / "frame_000.png"  # consistent with frame_index=0
     try:
         subprocess.run(
             [cli, str(src), str(out), "--frame", "0"],
@@ -234,6 +245,10 @@ def extract_previews(row: sqlite3.Row, ffmpeg: str) -> None:
         if not frames:
             db.mark_preview_failed(media_id, "no frames extracted")
             return
+
+        # Remove stale frames (handles FRAME_COUNT decrease: old frame rows
+        # with higher indexes would otherwise persist and pollute search).
+        db.delete_frames_for_media(media_id)
 
         for idx, (pos, path) in enumerate(frames):
             w, h = _img_size(path)

@@ -130,35 +130,34 @@ async def ensure_logged_in(
     client = TelegramClient(str(session_path), api_id, api_hash)
 
     await client.connect()
+    try:
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            name = me.first_name or ""
+            handle = f"@{me.username}" if me.username else f"id={me.id}"
+            print(f"Already logged in as {name} ({handle})")
+            _secure_session(session_path)
+            return
 
-    if await client.is_user_authorized():
-        me = await client.get_me()
-        name = me.first_name or ""
-        handle = f"@{me.username}" if me.username else f"id={me.id}"
-        print(f"Already logged in as {name} ({handle})")
+        if method is None:
+            print("\nChoose login method:")
+            print("  1) QR code   (recommended — works without SMS)")
+            print("  2) Phone number + verification code")
+            choice = input("Enter 1 or 2: ").strip()
+            method = "qr" if choice == "1" else "phone"
+
+        if method == "qr":
+            await _login_qr(client)
+        else:
+            await _login_phone(client)
+
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            name = me.first_name or ""
+            handle = f"@{me.username}" if me.username else f"id={me.id}"
+            print(f"\nSuccess! Logged in as {name} ({handle})")
+            _secure_session(session_path)
+        else:
+            print("\nLogin did not complete — not authorized.")
+    finally:
         await client.disconnect()
-        _secure_session(session_path)
-        return
-
-    if method is None:
-        print("\nChoose login method:")
-        print("  1) QR code   (recommended — works without SMS)")
-        print("  2) Phone number + verification code")
-        choice = input("Enter 1 or 2: ").strip()
-        method = "qr" if choice == "1" else "phone"
-
-    if method == "qr":
-        await _login_qr(client)
-    else:
-        await _login_phone(client)
-
-    if await client.is_user_authorized():
-        me = await client.get_me()
-        name = me.first_name or ""
-        handle = f"@{me.username}" if me.username else f"id={me.id}"
-        print(f"\nSuccess! Logged in as {name} ({handle})")
-        _secure_session(session_path)
-    else:
-        print("\nLogin did not complete — not authorized.")
-
-    await client.disconnect()

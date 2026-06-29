@@ -71,12 +71,18 @@ either use `DEVICE=cpu` with the default, or switch to the small
 git clone https://github.com/GolovIaroslav/StickerRadar.git
 cd StickerRadar
 
-# Recommended: uv (fast)
-pip install uv
+# Recommended: uv (fast, no venv activation needed)
+# Install uv first if you don't have it:
+#   Linux / macOS:  curl -LsSf https://astral.sh/uv/install.sh | sh
+#   Arch Linux:     sudo pacman -S uv
+#   Windows:        winget install astral-sh.uv
 uv sync
 
-# Or with pip
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+# Or with pip (must activate the venv before running app commands)
+python -m venv .venv
+source .venv/bin/activate        # bash / zsh
+# source .venv/bin/activate.fish  # fish shell
+# .venv\Scripts\activate          # Windows PowerShell
 pip install -e .
 ```
 
@@ -96,18 +102,18 @@ uv add rlottie-python   # primary renderer
 cp .env.example .env          # then edit .env
 
 # 2. Log in to Telegram (QR recommended)
-python -m app login
+uv run python -m app login
 
 # 3. Build the index (downloads stickers, embeds them)
-python -m app sync
+uv run python -m app sync
 
 # 4. Start the bot
-python -m app run
+uv run python -m app run
 
 # 5. Open your bot in Telegram and type any phrase
 ```
 
-That's it. After the first setup you only ever need `python -m app run`, and `/sync` from inside the bot to pick up new stickers.
+That's it. After the first setup you only ever need `uv run python -m app run`, and `/sync` from inside the bot to pick up new stickers.
 
 ### Credentials
 
@@ -121,7 +127,7 @@ Put all four into `.env`.
 
 ### Logging in
 
-`python -m app login` asks you to choose:
+`uv run python -m app login` asks you to choose:
 
 - **QR code (recommended):** On your phone, open Telegram, go to Settings > Devices > Link Desktop Device, and scan the QR shown in the terminal. The QR auto-refreshes.
 - **Phone number:** The code arrives as a message from the official *Telegram* account (user 777000) **inside the Telegram app — not as SMS**. If it never arrives, use QR login instead.
@@ -133,7 +139,7 @@ If you have 2FA enabled, you'll be asked for your password.
 ## CLI reference
 
 ```
-python -m app <command>
+uv run python -m app <command>
 ```
 
 | Command | Description |
@@ -182,7 +188,7 @@ Re-running `sync` is safe and efficient. The pipeline only processes items that 
 To force a full rebuild after changing `FRAME_COUNT` (frame structure changes):
 
 ```bash
-python -m app sync --reindex
+uv run python -m app sync --reindex
 ```
 
 ---
@@ -192,7 +198,7 @@ python -m app sync --reindex
 StickerRadar uses **CLIP-style multimodal models** that encode both images and text into the same vector space. Text-only models (Gemini Embedding, Qwen3-text, etc.) are not compatible — they cannot encode sticker images.
 
 ```bash
-python -m app models    # list all options + per-model install instructions
+uv run python -m app models    # list all options + per-model install instructions
 ```
 
 | Model | Params | Size | License | Notes |
@@ -215,10 +221,10 @@ exact language list, test your languages locally rather than trusting a number.
 ```bash
 # In .env:
 MODEL_NAME=google/siglip2-base-patch16-224   # tested, lightweight
-python -m app sync --reindex
+uv run python -m app sync --reindex
 ```
 
-To switch to any model, set `MODEL_NAME` in `.env`, install any extra deps shown by `python -m app models`, then run `python -m app sync --reindex`.
+To switch to any model, set `MODEL_NAME` in `.env`, install any extra deps shown by `uv run python -m app models`, then run `uv run python -m app sync --reindex`.
 
 **Licenses matter:** several strong models (Jina) are **non-commercial**. For commercial use, prefer the Apache-2.0 models (Qwen3-VL, SigLIP2) or MIT (OpenAI CLIP).
 
@@ -238,7 +244,7 @@ It's loaded via sentence-transformers and must be a CLIP-style model that embeds
 ## Disk usage
 
 ```bash
-python -m app stats
+uv run python -m app stats
 ```
 
 Shows: media downloads, preview frames, database, model cache, total, and top failure reasons.
@@ -248,7 +254,7 @@ Shows: media downloads, preview frames, database, model cache, total, and top fa
 **Downloaded media is kept** because it's needed for the *first* send of each sticker: Telegram only returns a reusable `file_id` after you upload the file once. Once a sticker has been sent (its `file_id` is cached), its local copy is no longer needed:
 
 ```bash
-python -m app prune    # delete media for already-sent stickers
+uv run python -m app prune    # delete media for already-sent stickers
 ```
 
 Pruned stickers still send instantly via their cached `file_id`. (If you later switch models, pruned items can't be re-embedded without their media — re-run `sync --download` first.)
@@ -270,13 +276,13 @@ Pruned stickers still send instantly via their cached `file_id`. (If you later s
 
 ## Troubleshooting
 
-**Login code not arriving via phone:** use QR login, `python -m app login --method qr`
+**Login code not arriving via phone:** use QR login, `uv run python -m app login --method qr`
 
-**"database is locked":** only one process can use the session at a time. Stop any running `python -m app run` before running `sync` manually, or use the bot's `/sync` command which reuses the active connection.
+**"database is locked":** only one process can use the session at a time. Stop any running `uv run python -m app run` before running `sync` manually, or use the bot's `/sync` command which reuses the active connection.
 
-**Download fails ("file_reference may be expired"):** run `sync --metadata` first to refresh references, then `sync --download`.
+**Download fails ("file_reference may be expired"):** run `uv run python -m app sync --metadata` first to refresh references, then `uv run python -m app sync --download`.
 
-**Search returns nothing after sync:** check `python -m app status` — the `embedded` count should be above 0. If it's 0, run `python -m app sync --embed`.
+**Search returns nothing after sync:** check `uv run python -m app status` — the `embedded` count should be above 0. If it's 0, run `uv run python -m app sync --embed`.
 
 ---
 

@@ -33,6 +33,23 @@ class ModelEntry:
 
 
 REGISTRY: list[ModelEntry] = [
+    # ── Default: best clean-license multilingual option ───────────────────────
+    ModelEntry(
+        key="google/siglip2-so400m-patch16-384",
+        loader="hf",
+        params="~1.1B",
+        size="~2 GB",
+        license="Apache-2.0",
+        quality="best",
+        langs="109 langs incl. RU/ZH (documented)",
+        verified=True,
+        notes=(
+            "Default. Best Apache-2.0 multilingual option. SigLIP2 SO400M, 384px.\n"
+            "No extra install needed (transformers). No trust_remote_code.\n"
+            "Fits 6 GB GPU in fp16. Fallback to CPU on OOM."
+        ),
+    ),
+    # ── Quality: heavier, strongest multilingual multimodal ───────────────────
     ModelEntry(
         key="Qwen/Qwen3-VL-Embedding-2B",
         loader="st",
@@ -44,12 +61,13 @@ REGISTRY: list[ModelEntry] = [
         trust_remote_code=True,
         verified=True,
         notes=(
-            "Default. Strongest open-license (Apache-2.0) option. Multimodal, 30+ languages.\n"
-            "Loads via sentence-transformers; needs torchvision (already a dependency).\n"
-            "Heavy: ~2B params. Does NOT fit small GPUs (<8 GB) — runs on CPU automatically.\n"
-            "On a small/busy GPU set  DEVICE=cpu  in .env (slower but works; uses RAM)."
+            "Best quality option (Apache-2.0). Multimodal, 30+ languages.\n"
+            "Loads via sentence-transformers. Heavy: ~4 GB fp16 VRAM needed.\n"
+            "On a small/busy GPU set  DEVICE=cpu  in .env (uses RAM, slower).\n"
+            "Requires trust_remote_code — review the model card before using."
         ),
     ),
+    # ── Fallbacks: lighter Apache-2.0 options ────────────────────────────────
     ModelEntry(
         key="google/siglip2-base-patch16-224",
         loader="hf",
@@ -57,10 +75,10 @@ REGISTRY: list[ModelEntry] = [
         size="~1.5 GB",
         license="Apache-2.0",
         quality="good",
-        langs="multilingual; exact language list not published — test RU/ZH locally",
+        langs="109 langs incl. RU/ZH (documented)",
         verified=True,
         notes=(
-            "Lightweight, VERIFIED fallback (load-tested). Google SigLIP2 (2025), Apache-2.0.\n"
+            "Lightweight VERIFIED fallback (load-tested). Google SigLIP2, Apache-2.0.\n"
             "No extra install needed (transformers). Best choice if the default fails."
         ),
     ),
@@ -71,12 +89,13 @@ REGISTRY: list[ModelEntry] = [
         size="~3.53 GB",
         license="Apache-2.0",
         quality="better",
-        langs="multilingual; exact language list not published — test RU/ZH locally",
+        langs="109 langs incl. RU/ZH (documented)",
         notes=(
             "Larger SigLIP2 (2025), Apache-2.0. Same loader as the verified base model.\n"
             "No extra install needed (transformers)."
         ),
     ),
+    # ── Non-commercial options ────────────────────────────────────────────────
     ModelEntry(
         key="jinaai/jina-clip-v2",
         loader="st",
@@ -84,12 +103,44 @@ REGISTRY: list[ModelEntry] = [
         size="~1.73 GB",
         license="CC-BY-NC-4.0",
         quality="best",
-        langs="89 languages; multimodal (image+text)",
+        langs="89 languages incl. RU/ZH; multimodal (image+text)",
         trust_remote_code=True,
         notes=(
             "Proven quality option (2024). NON-COMMERCIAL license.\n"
             "Needs:  uv add einops   (optional on CUDA: xFormers / FlashAttention)\n"
             "Loads via sentence-transformers with trust_remote_code."
+        ),
+    ),
+    ModelEntry(
+        key="facebook/metaclip-2-worldwide-huge",
+        loader="hf",
+        params="~2B",
+        size="~4+ GB",
+        license="CC-BY-NC-4.0",
+        quality="best",
+        langs="300+ languages (multilingual SOTA)",
+        experimental=True,
+        notes=(
+            "MetaCLIP 2 worldwide (2025). Best multilingual coverage, 300+ langs.\n"
+            "NON-COMMERCIAL license. Heavy: ~2B params. No extra install needed.\n"
+            "Experimental — verify availability and that it loads on your machine."
+        ),
+    ),
+    # ── Experimental / A-B candidates ────────────────────────────────────────
+    ModelEntry(
+        key="visheratin/mexma-siglip2",
+        loader="hf",
+        params="~1B",
+        size="~2 GB",
+        license="MIT",
+        quality="best",
+        langs="80 languages incl. RU/ZH",
+        trust_remote_code=True,
+        experimental=True,
+        notes=(
+            "MEXMA-SigLIP2 (MIT). Strong multilingual RU/ZH candidate for A/B testing.\n"
+            "Requires trust_remote_code — review the model repo before enabling.\n"
+            "Experimental — verify it loads correctly on your machine."
         ),
     ),
     ModelEntry(

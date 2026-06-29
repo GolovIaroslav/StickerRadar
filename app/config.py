@@ -85,7 +85,7 @@ EVAL_DIR: Path = DATA_DIR / "eval"
 
 MODEL_NAME: str = _str(
     "MODEL_NAME",
-    "Qwen/Qwen3-VL-Embedding-2B",
+    "google/siglip2-large-patch16-256",
 )
 
 # ---------------------------------------------------------------------------
@@ -96,6 +96,8 @@ TOP_K: int = _int("TOP_K", 10)
 FRAME_COUNT: int = _int("FRAME_COUNT", 5)
 SCAN_CONCURRENCY: int = _int("SCAN_CONCURRENCY", 4)
 BOT_SEND_DELAY_MS: int = _int("BOT_SEND_DELAY_MS", 250)
+# Unload model from RAM/VRAM after this many idle seconds. 0 = keep loaded forever.
+MODEL_IDLE_UNLOAD_SEC: int = _int("MODEL_IDLE_UNLOAD_SEC", 60)
 
 # ---------------------------------------------------------------------------
 # Optional features
@@ -103,6 +105,22 @@ BOT_SEND_DELAY_MS: int = _int("BOT_SEND_DELAY_MS", 250)
 
 ENABLE_CAPTIONS: bool = _bool("ENABLE_CAPTIONS", False)
 CAPTION_PROVIDER: str = _str("CAPTION_PROVIDER", "none")
+
+# OCR: extract text from preview frames for hybrid lexical search.
+# Requires:  uv add easyocr   (or rapidocr-onnxruntime for the rapidocr backend)
+# If the selected backend is not installed the OCR step is silently skipped.
+OCR_ENABLED: bool = _bool("OCR_ENABLED", True)
+OCR_BACKEND: str = _str("OCR_BACKEND", "easyocr")  # easyocr | rapidocr
+OCR_USE_GPU: bool = _bool("OCR_USE_GPU", False)  # OCR on CPU avoids GPU contention with CLIP
+# Comma-separated EasyOCR language codes. "ru,en" loads Cyrillic+Latin recognizer
+# (~50 European languages). Add "ko", "ja", "ch_sim", "ar" etc. for other scripts.
+# Full list: https://www.jaided.ai/easyocr/
+OCR_LANGS: str = _str("OCR_LANGS", "ru,en")
+
+# Security: allow arbitrary HuggingFace remote code execution.
+# Required only for custom (non-registry) models. Registry models that need
+# trust_remote_code (e.g. jina-clip-v2) are pre-approved via the registry flag.
+ALLOW_REMOTE_CODE: bool = _bool("ALLOW_REMOTE_CODE", False)
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +145,19 @@ def ensure_dirs() -> None:
 
 
 def set_profile(name: str) -> None:
-    """Switch active session/DB to the named profile. Call before db.get_conn()."""
-    global SESSION_PATH, DB_PATH
+    """Switch active session/DB/media dirs to the named profile. Call before db.get_conn()."""
+    import re
+    if not re.fullmatch(r"[\w\-]+", name):
+        raise ConfigError(
+            f"Invalid profile name {name!r}: only letters, digits, hyphens and underscores are allowed."
+        )
+    global SESSION_PATH, DB_PATH, MEDIA_DIR, PREVIEWS_DIR
     SESSION_PATH = (DATA_DIR / "sessions" / name).resolve()
     DB_PATH = (DATA_DIR / f"{name}.sqlite").resolve()
+    # Namespace media/preview dirs per profile so two profiles don't share
+    # autoincrement row IDs that would collide on the same paths.
+    MEDIA_DIR = DATA_DIR / name / "media"
+    PREVIEWS_DIR = DATA_DIR / name / "previews"
 
 
 def check_ffmpeg() -> str | None:

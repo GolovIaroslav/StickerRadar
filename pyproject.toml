@@ -39,9 +39,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # TGS (animated sticker) rendering — primary method
-tgs = ["rlottie-python>=0.3"]
+tgs = ["rlottie-python"]
 # TGS fallback renderer
 lottie = ["lottie>=0.7"]
+# OCR on sticker text (pulls PyTorch + OpenCV ~2 GB)
+ocr = ["easyocr>=1.7.2"]
+# MobileCLIP2 backend
+clip = ["open_clip_torch"]
 # Development tools
 dev = ["ruff>=0.4", "pytest>=8.0", "pytest-asyncio>=0.23"]
 
