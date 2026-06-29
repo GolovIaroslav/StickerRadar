@@ -97,7 +97,7 @@ FRAME_COUNT: int = _int("FRAME_COUNT", 5)
 SCAN_CONCURRENCY: int = _int("SCAN_CONCURRENCY", 4)
 BOT_SEND_DELAY_MS: int = _int("BOT_SEND_DELAY_MS", 250)
 # Unload model from RAM/VRAM after this many idle seconds. 0 = keep loaded forever.
-MODEL_IDLE_UNLOAD_SEC: int = _int("MODEL_IDLE_UNLOAD_SEC", 60)
+MODEL_IDLE_UNLOAD_SEC: int = _int("MODEL_IDLE_UNLOAD_SEC", 180)
 
 # ---------------------------------------------------------------------------
 # Optional features
