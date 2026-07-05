@@ -239,11 +239,13 @@ uv run python -m app models    # list all options + per-model install instructio
 | `google/siglip2-so400m-patch16-384` | ~1.1B | ~2 GB | Apache-2.0 | multilingual, heavier A/B option |
 | `Qwen/Qwen3-VL-Embedding-2B` | 2B | ~4.26 GB | Apache-2.0 | strongest quality candidate; CPU-friendly, GPU-heavy |
 | `google/siglip2-large-patch16-256` | 0.9B | ~3.53 GB | Apache-2.0 | multilingual; benchmark on your machine |
-| `jinaai/jina-clip-v2` | 0.9B | ~1.73 GB | CC BY-NC 4.0 | 89 langs, multimodal |
-| `jinaai/jina-embeddings-v5-omni-nano-retrieval` | ~0.95B | ~1.9 GB | CC BY-NC 4.0 | multimodal; language count unconfirmed |
-| `jinaai/jina-embeddings-v5-omni-small-retrieval` | ~1.56B | ~3.12 GB | CC BY-NC 4.0 | multimodal; language count unconfirmed |
+| `jinaai/jina-clip-v2` | 0.9B | ~1.73 GB | CC BY-NC 4.0 | blocked by current transformers compatibility |
+| `jinaai/jina-embeddings-v5-omni-nano-retrieval` | ~0.95B | ~1.9 GB | CC BY-NC 4.0 | verified; slower/heavier than siglip2-base |
+| `jinaai/jina-embeddings-v5-omni-small-retrieval` | ~1.56B | ~3.12 GB | CC BY-NC 4.0 | verified; still not worth the extra cost here |
+| `facebook/metaclip-2-worldwide-huge` | ~2B | ~4+ GB | CC BY-NC 4.0 | repo/access blocked in current environment |
+| `visheratin/mexma-siglip2` | ~1B | ~2 GB | MIT | remote-code compatibility break in current stack |
 | `openai/clip-vit-large-patch14` | 0.4B | ~1.71 GB | MIT | English only |
-| `apple/MobileCLIP2-S2` | ~99M | ~398 MB | Apple AMLR (research) | small |
+| `apple/MobileCLIP2-S2` | ~99M | ~398 MB | Apple AMLR (research) | verified; small, but not better than siglip2-base |
 | `jinaai/jina-embeddings-v4` | 4B | ~7.89 GB | Qwen Research License | heavy, multimodal, 30+ langs |
 
 Sizes are approximate (core model weights). Where a model card doesn't publish an
@@ -252,6 +254,8 @@ exact language list, test your languages locally rather than trusting a number.
 **Recommended default** is `google/siglip2-base-patch16-224` for most local installs. In local StickerRadar retrieval benchmarks it stayed very close to `siglip2-so400m` on quality while using much less RAM/VRAM. If you have more headroom and want to A/B a heavier open-license option, try `google/siglip2-so400m-patch16-384`.
 
 `Qwen/Qwen3-VL-Embedding-2B` remains a strong quality candidate, but on this 6 GB GPU it failed with CUDA OOM during image retrieval. CPU mode worked, but was much slower.
+
+Among the experimental/non-commercial options tested here, none beat `siglip2-base` as a practical default: `MobileCLIP2-S2`, `jina-v5-omni-nano`, and `jina-v5-omni-small` all loaded successfully, but each was slower and/or heavier without a clear retrieval-quality win on this corpus. Several other candidates are currently blocked by stack or access issues (`jina-clip-v2`, `mexma-siglip2`, `metaclip-2-worldwide-huge`).
 
 ```bash
 # In .env:
@@ -277,6 +281,9 @@ Measured here on this machine / local corpus:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `google/siglip2-base-patch16-224` | auto (GPU) | 20 / 60 | 9.22 s | 0.847 | 0.717 | 1.0 | ~2988 MB | ~1009 MB | Best local balance |
 | `google/siglip2-so400m-patch16-384` | auto (GPU) | 20 / 60 | 11.22 s | 0.845 | 0.717 | 1.0 | ~7346 MB | ~2805 MB | Similar quality, much heavier |
+| `apple/MobileCLIP2-S2` | auto (GPU) | 20 / 60 | 19.90 s | 0.833 | 0.717 | 0.983 | ~1728 MB | ~971 MB | Loads fine, but no quality win |
+| `jinaai/jina-embeddings-v5-omni-nano-retrieval` | auto (GPU) | 20 / 60 | 45.27 s | 0.833 | 0.717 | 0.967 | ~4544 MB | ~2165 MB | Verified, but worse trade-off than siglip2-base |
+| `jinaai/jina-embeddings-v5-omni-small-retrieval` | auto (GPU) | 15 / 45 | 49.74 s | 0.837 | 0.733 | 0.956 | ~4153 MB | ~3379 MB | Verified, still too heavy for the gain |
 | `google/siglip2-base-patch16-224` | cpu | 30 / 90 | 21.93 s | 0.786 | 0.667 | 0.956 | ~2008 MB | 0 MB | Good CPU-only fallback |
 | `Qwen/Qwen3-VL-Embedding-2B` | cpu | 15 / 45 | 407.80 s | 0.826 | 0.711 | 0.978 | ~7369 MB | 0 MB | Strong but very slow on CPU |
 

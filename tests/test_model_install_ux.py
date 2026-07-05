@@ -16,6 +16,18 @@ def test_open_clip_registry_entry_exposes_pretrained_tag():
     assert entry.open_clip_pretrained == "dfndr2b"
 
 
+def test_verified_and_experimental_flags_match_measured_embedding_status():
+    from app.models import get
+
+    nano = get("jinaai/jina-embeddings-v5-omni-nano-retrieval")
+    small = get("jinaai/jina-embeddings-v5-omni-small-retrieval")
+    mexma = get("visheratin/mexma-siglip2")
+
+    assert nano is not None and nano.verified and nano.experimental
+    assert small is not None and small.verified and small.experimental
+    assert mexma is not None and mexma.experimental and not mexma.verified
+
+
 def test_embedding_install_command_defaults_to_none_needed():
     from app.models import get_install_command
 

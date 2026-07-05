@@ -130,7 +130,8 @@ REGISTRY: list[ModelEntry] = [
         notes=(
             "MetaCLIP 2 worldwide (2025). Best multilingual coverage, 300+ langs.\n"
             "NON-COMMERCIAL license. Heavy: ~2B params. No extra install needed.\n"
-            "Experimental — verify availability and that it loads on your machine."
+            "Current local benchmark attempt is blocked because this repo id was not publicly\n"
+            "resolvable from the current environment (401 / invalid model identifier)."
         ),
     ),
     # ── Experimental / A-B candidates ────────────────────────────────────────
@@ -147,7 +148,8 @@ REGISTRY: list[ModelEntry] = [
         notes=(
             "MEXMA-SigLIP2 (MIT). Strong multilingual RU/ZH candidate for A/B testing.\n"
             "Requires trust_remote_code — review the model repo before enabling.\n"
-            "Experimental — verify it loads correctly on your machine."
+            "Current local benchmark attempt is blocked by a remote-code compatibility break\n"
+            "(`SiglipVisionModel` missing `vision_model` in the current transformers stack)."
         ),
     ),
     ModelEntry(
@@ -160,10 +162,12 @@ REGISTRY: list[ModelEntry] = [
         langs="multimodal (text/image/video/audio); language count unconfirmed",
         trust_remote_code=True,
         experimental=True,
+        verified=True,
         notes=(
             "Newest (2026), multimodal, light for its quality. NON-COMMERCIAL license.\n"
-            "Experimental — verify availability on Hugging Face and that it loads.\n"
-            "Needs:  uv add einops (and possibly more — see the model card)."
+            "Load-tested here on a 6 GB GPU, but retrieval quality stayed behind siglip2-base\n"
+            "while using more RAM/VRAM and much more time.\n"
+            "Needs:  uv add einops"
         ),
         install_command="uv add einops",
     ),
@@ -177,9 +181,11 @@ REGISTRY: list[ModelEntry] = [
         langs="multimodal (text/image/video/audio/PDF); language count unconfirmed",
         trust_remote_code=True,
         experimental=True,
+        verified=True,
         notes=(
             "Newest (2026), heavier than nano, higher quality. NON-COMMERCIAL license.\n"
-            "Experimental — verify availability and loading. Needs: uv add einops."
+            "Load-tested here on a 6 GB GPU, but still failed to beat siglip2-base\n"
+            "convincingly while using much more VRAM and latency. Needs: uv add einops."
         ),
         install_command="uv add einops",
     ),
