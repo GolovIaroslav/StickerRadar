@@ -7,6 +7,15 @@ def test_embedding_registry_default_prefers_siglip2_base():
     assert default().key == "google/siglip2-base-patch16-224"
 
 
+def test_open_clip_registry_entry_exposes_pretrained_tag():
+    from app.models import get
+
+    entry = get("apple/MobileCLIP2-S2")
+    assert entry is not None
+    assert entry.loader == "open_clip"
+    assert entry.open_clip_pretrained == "dfndr2b"
+
+
 def test_embedding_install_command_defaults_to_none_needed():
     from app.models import get_install_command
 
@@ -16,7 +25,7 @@ def test_embedding_install_command_defaults_to_none_needed():
 def test_embedding_install_command_surfaces_extra_dependencies():
     from app.models import get_install_command
 
-    assert get_install_command("jinaai/jina-clip-v2") == "uv add einops"
+    assert get_install_command("jinaai/jina-clip-v2") == "uv add einops timm requests"
 
 
 def test_ocr_install_plan_includes_selected_embedding_and_ocr_choices():

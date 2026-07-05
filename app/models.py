@@ -31,6 +31,7 @@ class ModelEntry:
     verified: bool = False     # True = load tested in this project
     experimental: bool = False
     install_command: str = "No extra install needed"
+    open_clip_pretrained: str | None = None
 
 
 REGISTRY: list[ModelEntry] = [
@@ -110,10 +111,12 @@ REGISTRY: list[ModelEntry] = [
         trust_remote_code=True,
         notes=(
             "Proven quality option (2024). NON-COMMERCIAL license.\n"
-            "Needs:  uv add einops   (optional on CUDA: xFormers / FlashAttention)\n"
-            "Loads via sentence-transformers with trust_remote_code."
+            "Needs extra runtime deps in this project: uv add einops timm requests\n"
+            "Current local benchmark attempt is blocked by a transformers compatibility break\n"
+            "(`clip_loss` import in remote code). Treat as experimental until that stack mismatch is resolved."
         ),
-        install_command="uv add einops",
+        install_command="uv add einops timm requests",
+        experimental=True,
     ),
     ModelEntry(
         key="facebook/metaclip-2-worldwide-huge",
@@ -202,12 +205,15 @@ REGISTRY: list[ModelEntry] = [
         quality="fast",
         langs="small; English-leaning not formally confirmed",
         experimental=True,
+        verified=True,
         notes=(
-            "Apple MobileCLIP2 (2025). Tiny and very fast, English-leaning.\n"
-            "Needs:  uv add open_clip_torch\n"
-            "Experimental loader — verify it works on your machine."
+            "Apple MobileCLIP2 (2025). Tiny and fast to download, English-leaning.\n"
+            "Measured here on 20 real stickers: decent quality (MRR ~0.833) but slower\n"
+            "and not better than siglip2-base for Russian-heavy retrieval.\n"
+            "Needs:  uv add open_clip_torch"
         ),
         install_command="uv add open_clip_torch",
+        open_clip_pretrained="dfndr2b",
     ),
     ModelEntry(
         key="jinaai/jina-embeddings-v4",

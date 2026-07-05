@@ -161,7 +161,7 @@ class _STBackend:
 class _OpenClipBackend:
     """open_clip backend (MobileCLIP). Experimental."""
 
-    def __init__(self, model_id: str, device: str) -> None:
+    def __init__(self, model_name: str, pretrained_tag: str, device: str) -> None:
         try:
             import open_clip
         except ImportError:
@@ -174,13 +174,12 @@ class _OpenClipBackend:
         self.torch = torch
         self.open_clip = open_clip
         self.device = device
-        name = model_id.split("/")[-1]
-        print(f"Loading model: {model_id}  (open_clip, device={self.device})")
+        print(f"Loading model: {model_name}  (open_clip, pretrained={pretrained_tag}, device={self.device})")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-            name, pretrained=model_id
+            model_name, pretrained=pretrained_tag
         )
         self.model = self.model.to(self.device).eval()
-        self.tokenizer = open_clip.get_tokenizer(name)
+        self.tokenizer = open_clip.get_tokenizer(model_name)
 
     def encode_images(self, images: list[Image.Image]) -> np.ndarray:
         batch = self.torch.stack([self.preprocess(im) for im in images]).to(self.device)
@@ -278,7 +277,9 @@ class Embedder:
         if entry.loader == "hf":
             return _HFBackend(entry.key, entry.text_padding, entry.trust_remote_code, device)
         if entry.loader == "open_clip":
-            return _OpenClipBackend(entry.key, device)
+            model_name = entry.key.split("/")[-1]
+            pretrained_tag = entry.open_clip_pretrained or entry.key
+            return _OpenClipBackend(model_name, pretrained_tag, device)
         image_model = config.IMAGE_MODEL_NAME or entry.key
         return _STBackend(entry.key, image_model, entry.trust_remote_code, device)
 
