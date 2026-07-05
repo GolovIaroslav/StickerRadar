@@ -50,18 +50,19 @@ Everything runs on your machine. No data leaves except standard Telegram API cal
 |---|---|
 | Python 3.11+ | 3.12 recommended |
 | ffmpeg | Must be in `PATH` (used for animated/video stickers) |
-| RAM | ~6–8 GB for the 2B default model; ~2 GB if you use `siglip2-base` |
+| RAM | ~2–3 GB for `siglip2-base`; more for heavier A/B models |
 | A Telegram account | With sticker packs installed |
 
 Runs on **Linux, macOS, and Windows**. On Windows, use PowerShell or Windows
 Terminal (for clean QR rendering) and make sure `ffmpeg` is on your `PATH`.
 
 **GPU vs CPU:** embedding runs on the GPU automatically if a CUDA PyTorch is
-installed. The 2B default model needs **~8 GB VRAM** — on a smaller or busy GPU
-it automatically falls back to CPU (uses system RAM, slower but reliable). You
-can force it with `DEVICE=cpu` (or `DEVICE=cuda`) in `.env`. For GPUs under 8 GB,
-either use `DEVICE=cpu` with the default, or switch to the small
-`google/siglip2-base-patch16-224` model which fits easily.
+installed. The recommended default `google/siglip2-base-patch16-224` is the
+best local balance we measured here: on real StickerRadar retrieval tests it was
+very close to `siglip2-so400m`, but with much lower RAM/VRAM use. On GPUs with
+more headroom you can A/B heavier models such as `siglip2-so400m`. The
+`Qwen/Qwen3-VL-Embedding-2B` option is stronger on quality, but on this 6 GB GPU
+it hit CUDA OOM for image retrieval and only worked reliably on CPU.
 
 ---
 
@@ -186,6 +187,7 @@ uv run python -m app <command>
 | `models` | List available embedding models and upgrade instructions |
 | `ocr-models` | List OCR profile options, trade-offs, and install commands |
 | `ocr-benchmark --backend ...` | Benchmark one OCR backend on real local stickers |
+| `retrieval-benchmark --model ...` | Benchmark retrieval quality for one embedding model on real stickers |
 | `setup` | Run the first-run setup wizard again |
 | `session reset` | Delete the session file (re-login required) |
 | `search "<query>"` | CLI search for testing |
@@ -233,9 +235,10 @@ uv run python -m app models    # list all options + per-model install instructio
 
 | Model | Params | Size | License | Notes |
 |---|---|---|---|---|
-| `Qwen/Qwen3-VL-Embedding-2B` | 2B | ~4.26 GB | Apache-2.0 | 30+ langs, multimodal (default) |
-| `google/siglip2-base-patch16-224` | 0.4B | ~1.5 GB | Apache-2.0 | multilingual (load-tested fallback) |
-| `google/siglip2-large-patch16-256` | 0.9B | ~3.53 GB | Apache-2.0 | multilingual |
+| `google/siglip2-base-patch16-224` | 0.4B | ~1.5 GB | Apache-2.0 | recommended default; multilingual, low-memory |
+| `google/siglip2-so400m-patch16-384` | ~1.1B | ~2 GB | Apache-2.0 | multilingual, heavier A/B option |
+| `Qwen/Qwen3-VL-Embedding-2B` | 2B | ~4.26 GB | Apache-2.0 | strongest quality candidate; CPU-friendly, GPU-heavy |
+| `google/siglip2-large-patch16-256` | 0.9B | ~3.53 GB | Apache-2.0 | multilingual; benchmark on your machine |
 | `jinaai/jina-clip-v2` | 0.9B | ~1.73 GB | CC BY-NC 4.0 | 89 langs, multimodal |
 | `jinaai/jina-embeddings-v5-omni-nano-retrieval` | ~0.95B | ~1.9 GB | CC BY-NC 4.0 | multimodal; language count unconfirmed |
 | `jinaai/jina-embeddings-v5-omni-small-retrieval` | ~1.56B | ~3.12 GB | CC BY-NC 4.0 | multimodal; language count unconfirmed |
@@ -246,11 +249,13 @@ uv run python -m app models    # list all options + per-model install instructio
 Sizes are approximate (core model weights). Where a model card doesn't publish an
 exact language list, test your languages locally rather than trusting a number.
 
-**Default** is `Qwen/Qwen3-VL-Embedding-2B` (Apache-2.0, strongest open-license option). It is heavy and needs to run on CPU on GPUs under ~8 GB. If it fails on the first `sync`, fall back to the load-tested model:
+**Recommended default** is `google/siglip2-base-patch16-224` for most local installs. In local StickerRadar retrieval benchmarks it stayed very close to `siglip2-so400m` on quality while using much less RAM/VRAM. If you have more headroom and want to A/B a heavier open-license option, try `google/siglip2-so400m-patch16-384`.
+
+`Qwen/Qwen3-VL-Embedding-2B` remains a strong quality candidate, but on this 6 GB GPU it failed with CUDA OOM during image retrieval. CPU mode worked, but was much slower.
 
 ```bash
 # In .env:
-MODEL_NAME=google/siglip2-base-patch16-224   # tested, lightweight
+MODEL_NAME=google/siglip2-base-patch16-224   # recommended default
 uv run python -m app sync --reindex
 ```
 
@@ -258,7 +263,30 @@ To switch to any model, set `MODEL_NAME` in `.env`, install any extra deps shown
 
 **Licenses matter:** several strong models (Jina) are **non-commercial**. For commercial use, prefer the Apache-2.0 models (Qwen3-VL, SigLIP2) or MIT (OpenAI CLIP).
 
-**Not compatible:** text-only embedders (Gemini Embedding, Qwen3 *text* embedding, OpenAI text-embedding-3, BGE, E5) cannot encode sticker images.
+### Local retrieval benchmark results
+
+StickerRadar now includes a retrieval benchmark that builds a temporary eval DB from real local stickers and runs the actual search pipeline:
+
+```bash
+uv run python -m app retrieval-benchmark --model google/siglip2-base-patch16-224 --device auto --sample-size 20 --seed 42
+```
+
+Measured here on this machine / local corpus:
+
+| Model | Device | Sample / Queries | Time | MRR | Hit@1 | Hit@5 | RAM delta | VRAM delta | Practical note |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `google/siglip2-base-patch16-224` | auto (GPU) | 20 / 60 | 9.22 s | 0.847 | 0.717 | 1.0 | ~2988 MB | ~1009 MB | Best local balance |
+| `google/siglip2-so400m-patch16-384` | auto (GPU) | 20 / 60 | 11.22 s | 0.845 | 0.717 | 1.0 | ~7346 MB | ~2805 MB | Similar quality, much heavier |
+| `google/siglip2-base-patch16-224` | cpu | 30 / 90 | 21.93 s | 0.786 | 0.667 | 0.956 | ~2008 MB | 0 MB | Good CPU-only fallback |
+| `Qwen/Qwen3-VL-Embedding-2B` | cpu | 15 / 45 | 407.80 s | 0.826 | 0.711 | 0.978 | ~7369 MB | 0 MB | Strong but very slow on CPU |
+
+Observed failure mode:
+
+- `Qwen/Qwen3-VL-Embedding-2B` on this **6 GB GPU** failed with a real `CUDA out of memory` during image retrieval benchmark.
+
+So for practical local use on modest hardware, `siglip2-base` is the current recommendation.
+
+---
 
 **Custom model:** `MODEL_NAME` accepts either a Hugging Face id **or a local folder path**:
 

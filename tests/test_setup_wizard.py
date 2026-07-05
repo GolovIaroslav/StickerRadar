@@ -77,6 +77,38 @@ def test_runtime_profile_recommendation_prefers_lightweight_models_without_gpu()
     assert ocr.key == "rapidocr"
 
 
+def test_runtime_profile_recommendation_prefers_siglip2_base_on_typical_6gb_gpu():
+    from app.setup_wizard import RuntimeProfile, choose_default_embedding_model
+
+    runtime = RuntimeProfile(
+        has_gpu=True,
+        gpu_name="RTX 3060",
+        gpu_total_gb=6.0,
+        gpu_free_gb=5.9,
+        llama_cpp_available=False,
+        ffmpeg_available=True,
+    )
+
+    embedding = choose_default_embedding_model(runtime)
+    assert embedding.key == "google/siglip2-base-patch16-224"
+
+
+def test_runtime_profile_recommendation_prefers_so400m_when_vram_headroom_is_large():
+    from app.setup_wizard import RuntimeProfile, choose_default_embedding_model
+
+    runtime = RuntimeProfile(
+        has_gpu=True,
+        gpu_name="RTX 4090",
+        gpu_total_gb=24.0,
+        gpu_free_gb=18.0,
+        llama_cpp_available=False,
+        ffmpeg_available=True,
+    )
+
+    embedding = choose_default_embedding_model(runtime)
+    assert embedding.key == "google/siglip2-so400m-patch16-384"
+
+
 def test_runtime_profile_recommendation_prefers_easyocr_when_gpu_is_available():
     from app.setup_wizard import RuntimeProfile, choose_default_ocr_profile
 

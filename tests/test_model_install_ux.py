@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 
+def test_embedding_registry_default_prefers_siglip2_base():
+    from app.models import default
+
+    assert default().key == "google/siglip2-base-patch16-224"
+
+
 def test_embedding_install_command_defaults_to_none_needed():
     from app.models import get_install_command
 

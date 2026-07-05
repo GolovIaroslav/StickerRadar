@@ -45,9 +45,10 @@ REGISTRY: list[ModelEntry] = [
         langs="109 langs incl. RU/ZH (documented)",
         verified=True,
         notes=(
-            "Default. Best Apache-2.0 multilingual option. SigLIP2 SO400M, 384px.\n"
-            "No extra install needed (transformers). No trust_remote_code.\n"
-            "Fits 6 GB GPU in fp16. Fallback to CPU on OOM."
+            "Higher-memory Apache-2.0 multilingual option. SigLIP2 SO400M, 384px.\n"
+            "In local StickerRadar retrieval tests on a 6 GB GPU it matched siglip2-base\n"
+            "closely on quality, but used much more RAM/VRAM. Choose it for A/B testing\n"
+            "or if you want a heavier open-license option and have headroom."
         ),
     ),
     # ── Quality: heavier, strongest multilingual multimodal ───────────────────
@@ -62,9 +63,9 @@ REGISTRY: list[ModelEntry] = [
         trust_remote_code=True,
         verified=True,
         notes=(
-            "Best quality option (Apache-2.0). Multimodal, 30+ languages.\n"
-            "Loads via sentence-transformers. Heavy: ~4 GB fp16 VRAM needed.\n"
-            "On a small/busy GPU set  DEVICE=cpu  in .env (uses RAM, slower).\n"
+            "Heavy quality option (Apache-2.0). Multimodal, 30+ languages.\n"
+            "GPU benchmark on this 6 GB card failed with CUDA OOM during image retrieval,\n"
+            "but CPU mode worked and gave the strongest quality on a small sample.\n"
             "Requires trust_remote_code — review the model card before using."
         ),
     ),
@@ -79,8 +80,9 @@ REGISTRY: list[ModelEntry] = [
         langs="109 langs incl. RU/ZH (documented)",
         verified=True,
         notes=(
-            "Lightweight VERIFIED fallback (load-tested). Google SigLIP2, Apache-2.0.\n"
-            "No extra install needed (transformers). Best choice if the default fails."
+            "Recommended default for most local installs. Google SigLIP2, Apache-2.0.\n"
+            "In local StickerRadar retrieval benchmarks it stayed very close to siglip2-so400m\n"
+            "on quality while using much less RAM/VRAM, and it works well on CPU-only hosts."
         ),
     ),
     ModelEntry(
@@ -245,7 +247,7 @@ def get(key: str) -> ModelEntry | None:
 
 
 def default() -> ModelEntry:
-    return REGISTRY[0]
+    return next(m for m in REGISTRY if m.key == "google/siglip2-base-patch16-224")
 
 
 def get_install_command(key: str) -> str:

@@ -132,9 +132,9 @@ def detect_runtime_profile() -> RuntimeProfile:
 def choose_default_embedding_model(runtime: RuntimeProfile) -> ModelEntry:
     if not runtime.has_gpu:
         return next(m for m in REGISTRY if m.key == "google/siglip2-base-patch16-224")
-    if runtime.gpu_free_gb is not None and runtime.gpu_free_gb < 4.0:
+    if runtime.gpu_free_gb is not None and runtime.gpu_free_gb < 8.0:
         return next(m for m in REGISTRY if m.key == "google/siglip2-base-patch16-224")
-    return default_embedding_model()
+    return next(m for m in REGISTRY if m.key == "google/siglip2-so400m-patch16-384")
 
 
 def choose_default_ocr_profile(runtime: RuntimeProfile) -> OcrProfile:
@@ -230,9 +230,9 @@ def _select_embedding_model(runtime: RuntimeProfile) -> ModelEntry:
     print("These models must embed BOTH images and text. Recommended options are listed first.")
     shortlist = [
         next(m for m in REGISTRY if m.key == recommended.key),
+        next(m for m in REGISTRY if m.key == "google/siglip2-so400m-patch16-384"),
         next(m for m in REGISTRY if m.key == "google/siglip2-large-patch16-256"),
         next(m for m in REGISTRY if m.key == "Qwen/Qwen3-VL-Embedding-2B"),
-        next(m for m in REGISTRY if m.key == "google/siglip2-base-patch16-224"),
     ]
     seen: set[str] = set()
     options: list[ModelEntry] = []

@@ -5,6 +5,7 @@ Usage:
     python -m app login   [--method qr|phone] [--profile NAME]
     python -m app ocr-models
     python -m app ocr-benchmark --backend easyocr|rapidocr|glm-ocr [--limit N] [--seed N] [--cpu]
+    python -m app retrieval-benchmark --model MODEL_NAME [--device auto|cpu|cuda] [--sample-size N] [--seed N]
     python -m app sync    [--metadata|--download|--preview|--embed]
                           [--reindex] [--full-reindex] [--frames N] [--limit N]
     python -m app status  [--profile NAME]
@@ -500,6 +501,19 @@ def cmd_ocr_models(_args: argparse.Namespace) -> None:
         print(f"  {line}")
 
 
+def cmd_retrieval_benchmark(args: argparse.Namespace) -> None:
+    from app.retrieval_benchmark import run_benchmark
+    import json
+
+    summary = run_benchmark(
+        model_name=args.model,
+        device=args.device,
+        sample_size=args.sample_size,
+        seed=args.seed,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
 def _maybe_run_first_time_setup(args: argparse.Namespace) -> None:
     if getattr(args, "command", None) not in {"login", "sync", "run", "setup"}:
         return
@@ -572,6 +586,13 @@ def main() -> None:
     p.add_argument("--cpu", action="store_true", help="Force CPU mode where supported")
     p.add_argument("--llm-repo", default="ggml-org/GLM-OCR-GGUF:Q8_0", help="GGUF repo for glm-ocr")
 
+    # retrieval-benchmark
+    p = sub.add_parser("retrieval-benchmark", help="Benchmark retrieval quality for one embedding model on real stickers")
+    p.add_argument("--model", required=True, help="Embedding model key or custom model id/path")
+    p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"], help="Where to run the embedding model")
+    p.add_argument("--sample-size", type=int, default=120, metavar="N", help="Number of sticker previews to sample")
+    p.add_argument("--seed", type=int, default=42, metavar="N", help="Sampling seed for reproducible runs")
+
     # setup
     p = sub.add_parser("setup", help="Run the first-run setup wizard")
     p.add_argument("--quick", action="store_true", help="Write recommended defaults with minimal prompts")
@@ -607,6 +628,7 @@ def main() -> None:
         "models": cmd_models,
         "ocr-models": cmd_ocr_models,
         "ocr-benchmark": cmd_ocr_benchmark,
+        "retrieval-benchmark": cmd_retrieval_benchmark,
         "session": cmd_session,
         "search": cmd_search,
         "run": cmd_run,
