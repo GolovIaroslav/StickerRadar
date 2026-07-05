@@ -30,6 +30,7 @@ class ModelEntry:
     trust_remote_code: bool = False
     verified: bool = False     # True = load tested in this project
     experimental: bool = False
+    install_command: str = "No extra install needed"
 
 
 REGISTRY: list[ModelEntry] = [
@@ -110,6 +111,7 @@ REGISTRY: list[ModelEntry] = [
             "Needs:  uv add einops   (optional on CUDA: xFormers / FlashAttention)\n"
             "Loads via sentence-transformers with trust_remote_code."
         ),
+        install_command="uv add einops",
     ),
     ModelEntry(
         key="facebook/metaclip-2-worldwide-huge",
@@ -158,6 +160,7 @@ REGISTRY: list[ModelEntry] = [
             "Experimental — verify availability on Hugging Face and that it loads.\n"
             "Needs:  uv add einops (and possibly more — see the model card)."
         ),
+        install_command="uv add einops",
     ),
     ModelEntry(
         key="jinaai/jina-embeddings-v5-omni-small-retrieval",
@@ -173,6 +176,7 @@ REGISTRY: list[ModelEntry] = [
             "Newest (2026), heavier than nano, higher quality. NON-COMMERCIAL license.\n"
             "Experimental — verify availability and loading. Needs: uv add einops."
         ),
+        install_command="uv add einops",
     ),
     ModelEntry(
         key="openai/clip-vit-large-patch14",
@@ -201,6 +205,7 @@ REGISTRY: list[ModelEntry] = [
             "Needs:  uv add open_clip_torch\n"
             "Experimental loader — verify it works on your machine."
         ),
+        install_command="uv add open_clip_torch",
     ),
     ModelEntry(
         key="jinaai/jina-embeddings-v4",
@@ -216,6 +221,7 @@ REGISTRY: list[ModelEntry] = [
             "LEGACY (superseded by v5-omni). Very large (~7.89 GB), GPU recommended.\n"
             "Needs:  uv add peft einops"
         ),
+        install_command="uv add peft einops",
     ),
 ]
 
@@ -240,3 +246,10 @@ def get(key: str) -> ModelEntry | None:
 
 def default() -> ModelEntry:
     return REGISTRY[0]
+
+
+def get_install_command(key: str) -> str:
+    model = get(key)
+    if model is None:
+        return "See the model card / repository for install requirements"
+    return model.install_command

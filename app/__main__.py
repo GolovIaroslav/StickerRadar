@@ -3,6 +3,8 @@ python -m app — StickerRadar unified CLI.
 
 Usage:
     python -m app login   [--method qr|phone] [--profile NAME]
+    python -m app ocr-models
+    python -m app ocr-benchmark --backend easyocr|rapidocr|glm-ocr [--limit N] [--seed N] [--cpu]
     python -m app sync    [--metadata|--download|--preview|--embed]
                           [--reindex] [--full-reindex] [--frames N] [--limit N]
     python -m app status  [--profile NAME]
@@ -63,11 +65,12 @@ def _apply_profile(args: argparse.Namespace) -> None:
 def cmd_login(args: argparse.Namespace) -> None:
     _apply_profile(args)
     from app import config
+    api_id, api_hash = config.require_login_config()
     from app.auth import ensure_logged_in
     asyncio.run(ensure_logged_in(
         config.SESSION_PATH,
-        config.TG_API_ID,
-        config.TG_API_HASH,
+        api_id,
+        api_hash,
         method=getattr(args, "method", None),
     ))
 
@@ -156,6 +159,7 @@ def _interactive_sync_config() -> bool:
 def cmd_sync(args: argparse.Namespace) -> None:
     from app import config, db
     _apply_profile(args)
+    config.require_login_config()
 
     if getattr(args, "frames", None):
         config.FRAME_COUNT = args.frames
@@ -332,9 +336,9 @@ def cmd_models(_args: argparse.Namespace) -> None:
 
     active = config.MODEL_NAME
     print("\nAvailable embedding models")
-    print("─" * 100)
-    print(f"  {'MODEL KEY':<46} {'PARAMS':<7} {'SIZE':<9} {'LICENSE':<14} LANGUAGES")
-    print("─" * 100)
+    print("─" * 118)
+    print(f"  {'MODEL KEY':<46} {'PARAMS':<7} {'SIZE':<9} {'LICENSE':<22} {'INSTALL'}")
+    print("─" * 118)
     for m in REGISTRY:
         tags = []
         if m.key == active:
@@ -344,7 +348,7 @@ def cmd_models(_args: argparse.Namespace) -> None:
         if m.experimental:
             tags.append("experimental")
         tag = ("   " + ", ".join(tags)) if tags else ""
-        print(f"  {m.key:<46} {m.params:<7} {m.size:<9} {m.license:<14} {m.langs}{tag}")
+        print(f"  {m.key:<46} {m.params:<7} {m.size:<9} {m.license:<22} {m.install_command}{tag}")
     print()
     print("To switch model:")
     print("  1. Set MODEL_NAME=<key> in .env  (install any extra deps shown below)")
@@ -459,8 +463,52 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     _apply_profile(args)
+    from app import config
+    config.require_login_config()
+    config.require_bot_runtime_config()
     from app.main import cli_main
     cli_main()
+
+
+def cmd_setup(args: argparse.Namespace) -> None:
+    from app.setup_wizard import run_setup_wizard
+    run_setup_wizard(quick=getattr(args, "quick", False))
+
+
+def cmd_ocr_benchmark(args: argparse.Namespace) -> None:
+    from app.ocr_benchmark import run_benchmark
+
+    summary = run_benchmark(
+        backend=args.backend,
+        limit=args.limit,
+        seed=args.seed,
+        use_gpu=not getattr(args, "cpu", False) and args.backend in {"easyocr", "glm-ocr"},
+        llm_repo=args.llm_repo,
+    )
+    import json
+
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+def cmd_ocr_models(_args: argparse.Namespace) -> None:
+    from app.setup_wizard import detect_runtime_profile, ocr_profile_lines
+
+    runtime = detect_runtime_profile()
+    print("\nAvailable OCR profiles")
+    print("Choose based on speed, language quality, and how much extra software you want to install.")
+    for line in ocr_profile_lines(runtime):
+        print(f"  {line}")
+
+
+def _maybe_run_first_time_setup(args: argparse.Namespace) -> None:
+    if getattr(args, "command", None) not in {"login", "sync", "run", "setup"}:
+        return
+    from app.setup_wizard import wizard_needed, run_setup_wizard
+    if getattr(args, "command", None) == "setup":
+        return
+    if wizard_needed():
+        print("\nStickerRadar setup has not been completed yet.")
+        run_setup_wizard(quick=getattr(args, "yes", False))
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +561,21 @@ def main() -> None:
     # models
     sub.add_parser("models", help="List available embedding models and upgrade instructions")
 
+    # ocr-models
+    sub.add_parser("ocr-models", help="List OCR profile options, trade-offs, and install commands")
+
+    # ocr-benchmark
+    p = sub.add_parser("ocr-benchmark", help="Benchmark one OCR backend on real StickerRadar stickers")
+    p.add_argument("--backend", required=True, choices=["easyocr", "rapidocr", "glm-ocr"])
+    p.add_argument("--limit", type=int, default=20, metavar="N", help="Number of sticker files to sample")
+    p.add_argument("--seed", type=int, default=42, metavar="N", help="Sampling seed for reproducible runs")
+    p.add_argument("--cpu", action="store_true", help="Force CPU mode where supported")
+    p.add_argument("--llm-repo", default="ggml-org/GLM-OCR-GGUF:Q8_0", help="GGUF repo for glm-ocr")
+
+    # setup
+    p = sub.add_parser("setup", help="Run the first-run setup wizard")
+    p.add_argument("--quick", action="store_true", help="Write recommended defaults with minimal prompts")
+
     # session
     p = sub.add_parser("session", help="Manage named profiles")
     p.add_argument("action", choices=["list", "use", "delete", "reset"], nargs="?")
@@ -531,7 +594,10 @@ def main() -> None:
     if not getattr(args, "profile", None):
         args.profile = _read_active_profile()
 
+    _maybe_run_first_time_setup(args)
+
     dispatch = {
+        "setup": cmd_setup,
         "login": cmd_login,
         "sync": cmd_sync,
         "status": cmd_status,
@@ -539,6 +605,8 @@ def main() -> None:
         "prune": cmd_prune,
         "fts-rebuild": cmd_fts_rebuild,
         "models": cmd_models,
+        "ocr-models": cmd_ocr_models,
+        "ocr-benchmark": cmd_ocr_benchmark,
         "session": cmd_session,
         "search": cmd_search,
         "run": cmd_run,

@@ -95,11 +95,38 @@ uv add rlottie-python   # primary renderer
 
 ---
 
+## First-run setup wizard
+
+StickerRadar includes a guided **English setup wizard** for new users:
+
+```bash
+uv run python -m app setup
+```
+
+It helps the user choose:
+
+- the **embedding model** (with approximate size and license notes)
+- the **OCR profile** (fast classic OCR vs slower VLM-style OCR)
+- the best **device** (`auto`, `cpu`, `cuda`) based on detected hardware
+
+Current built-in OCR guidance comes from local tests on **20 real StickerRadar stickers**:
+
+- **EasyOCR + GPU** — best default here (~161 ms/image, best Russian accuracy)
+- **EasyOCR + CPU** — same quality, much slower (~611 ms/image)
+- **RapidOCR + CPU** — lower RAM and no GPU required, but much weaker on Russian meme text (~302 ms/image)
+- **GLM-OCR** — useful only as an optional rescue pass (~3973 ms/image, can over-read extra text)
+
+It also creates or updates `.env`, and it can be skipped quickly if the user
+already knows what they want. If someone runs `login`, `sync`, or `run` before
+completing setup, StickerRadar auto-launches the wizard once.
+
+---
+
 ## Quick start (5 steps)
 
 ```bash
-# 1. Get credentials (see table below) and configure
-cp .env.example .env          # then edit .env
+# 1. Run the setup wizard (recommended)
+uv run python -m app setup
 
 # 2. Log in to Telegram (QR recommended)
 uv run python -m app login
@@ -157,6 +184,9 @@ uv run python -m app <command>
 | `stats` | Show disk usage, model cache size, failure reasons |
 | `prune` | Delete local media for stickers already sent once (frees disk) |
 | `models` | List available embedding models and upgrade instructions |
+| `ocr-models` | List OCR profile options, trade-offs, and install commands |
+| `ocr-benchmark --backend ...` | Benchmark one OCR backend on real local stickers |
+| `setup` | Run the first-run setup wizard again |
 | `session reset` | Delete the session file (re-login required) |
 | `search "<query>"` | CLI search for testing |
 | `run` | Start the Telegram bot |
@@ -238,6 +268,42 @@ MODEL_NAME=/home/me/models/my-clip      # local path (C:\models\my-clip on Windo
 ```
 
 It's loaded via sentence-transformers and must be a CLIP-style model that embeds **both** images and text.
+
+---
+
+## OCR profiles and local benchmark command
+
+StickerRadar lets the user choose **whether OCR is worth downloading at all**, and if yes, which OCR path to use.
+
+```bash
+uv run python -m app ocr-models
+uv run python -m app ocr-benchmark --backend easyocr --limit 20 --seed 42
+uv run --with rapidocr-onnxruntime python -m app ocr-benchmark --backend rapidocr --limit 20 --seed 42 --cpu
+uv run --with easyocr python -m app ocr-benchmark --backend easyocr --limit 20 --seed 42 --cpu
+uv run python -m app ocr-benchmark --backend glm-ocr --limit 20 --seed 42
+```
+
+Measured on this project with **20 random real stickers** (same seed across runs):
+
+| OCR backend | Device | Approx model/runtime footprint | Speed | Quality summary |
+|---|---|---:|---:|---|
+| `easyocr` | GPU | ~300 MB download, ~469 MB observed VRAM delta | ~161 ms/image | Best overall balance here; strongest Russian sticker-text accuracy |
+| `easyocr` | CPU | ~300 MB download, ~1.3 GB RAM peak | ~611 ms/image | Same quality as GPU, but much slower |
+| `rapidocr` | CPU | ~150–250 MB assets, ~261 MB RAM peak | ~302 ms/image | Lower overhead, but often transliterates or mangles Cyrillic |
+| `glm-ocr` | GPU + llama.cpp | ~1.43 GB GGUF + mmproj | ~3973 ms/image | Can rescue some hard images, but often over-reads extra text; not recommended as bulk default |
+
+Practical recommendation:
+
+- **Want the best default for Russian / mixed-language sticker text?** Use `easyocr`.
+- **Need the lightest CPU-only option?** Use `rapidocr`.
+- **Need an experimental rescue pass for hard cases and accept slow indexing?** Try `glm-ocr` manually or as a carefully limited fallback.
+- **Do not care about exact printed text on stickers?** Disable OCR entirely and keep image-semantic search only.
+
+Notes:
+
+- `glm-ocr` first converts StickerRadar `.webp` stickers to temporary PNGs before sending them to `llama.cpp`, because direct WEBP decoding was unreliable in the tested path.
+- The benchmark command is intentionally single-backend per run so CPU/GPU contention does not distort results.
+- For `glm-ocr`, the benchmark's RAM/VRAM numbers mainly reflect the Python wrapper process; the important practical metric is wall-clock time.
 
 ---
 

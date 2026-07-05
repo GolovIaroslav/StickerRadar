@@ -159,7 +159,10 @@ def _run_ocr(limit: int | None) -> None:
     db.get_conn()
 
     if not ocr_mod.is_available():
-        print("OCR skipped — easyocr not installed. To enable:  uv add easyocr")
+        print(
+            f"OCR skipped — backend '{config.OCR_BACKEND}' is not available. "
+            f"To enable it: {ocr_mod.backend_install_hint()}"
+        )
         return
 
     rows = db.list_pending_ocr(limit if limit is not None else 10 ** 9)
