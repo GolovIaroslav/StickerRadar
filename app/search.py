@@ -2,21 +2,20 @@
 app/search.py — hybrid BM25+vector search with Reciprocal Rank Fusion.
 
 Pipeline:
-  1. Embed query text → cosine scores over cached frame embeddings (vector leg)
-  2. FTS5 BM25 over set_title / set_short_name / emoji (metadata leg)
-  3. FTS5 BM25 over OCR text extracted from frames (ocr leg)
-  4. Fuse all ranked lists via weighted RRF (k=60)
-     - short queries (≤3 words): FTS legs get 2× weight (exact text matters more)
-     - abstract queries: equal weights
-  5. Normalize fused scores to [0,1], apply metadata boosts, dedup, return top_k
+  1. Embed query text -> cosine scores over cached frame embeddings (image-semantic leg)
+  2. Embed query text -> cosine scores over cached OCR-text embeddings (text-semantic leg)
+  3. FTS5 BM25 over set_title / set_short_name / emoji (metadata leg)
+  4. FTS5 BM25 over OCR text extracted from frames (ocr lexical leg)
+  5. Fuse ranked lists via weighted RRF, normalize, apply boosts, dedup, return top_k
 
-If FTS / OCR legs return no results the search falls back to pure vector ranking.
+If lexical legs return no results the search falls back to semantic legs only.
 """
 from __future__ import annotations
 
 import re
 import sqlite3
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -34,7 +33,7 @@ def _get_embedder() -> Embedder:
 class SearchResult:
     media_id: int
     tg_document_id: str
-    media_kind: str          # sticker | gif
+    media_kind: str
     sticker_format: str | None
     local_path: str | None
     bot_file_id: str | None
@@ -51,30 +50,30 @@ class SearchResult:
 @dataclass
 class _EmbedCache:
     count: int
-    media_ids: list[int]            # one entry per frame row
-    vecs: np.ndarray                # shape (N, dim)
-    meta: dict[int, sqlite3.Row]    # media_id → metadata row
+    text_count: int
+    media_ids: list[int]
+    vecs: np.ndarray
+    text_media_ids: list[int]
+    text_vecs: np.ndarray
+    meta: dict[int, Any]
 
 
 _cache: dict[str, _EmbedCache] = {}
 
 
 def invalidate_cache() -> None:
-    """Call after /sync so the next query picks up new embeddings."""
     _cache.clear()
 
 
 def _load(model_name: str) -> _EmbedCache:
-    """
-    Return cached embeddings + metadata, invalidated when embedding count changes.
-    Metadata folded into the JOIN — no second IN(...) query needed.
-    """
     count = db.count_embeddings_for_model(model_name)
+    count_text = db.count_text_embeddings_for_model(model_name)
     cached = _cache.get(model_name)
-    if cached is not None and cached.count == count:
+    if cached is not None and cached.count == count and cached.text_count == count_text:
         return cached
 
-    rows = db.get_conn().execute(
+    conn = db.get_conn()
+    rows = conn.execute(
         """
         SELECT mi.id AS media_id, fe.vector, fe.dim,
                mi.tg_document_id, mi.media_kind, mi.sticker_format,
@@ -91,36 +90,88 @@ def _load(model_name: str) -> _EmbedCache:
         (model_name,),
     ).fetchall()
 
-    if not rows:
-        entry = _EmbedCache(count=count, media_ids=[], vecs=np.empty((0, 0), dtype=np.float32), meta={})
+    text_rows = conn.execute(
+        """
+        SELECT mte.media_id, mte.vector, mte.dim
+        FROM media_text_embeddings mte
+        JOIN media_items mi ON mi.id = mte.media_id
+        WHERE mte.model_name = ?
+          AND mi.embed_status = 'ok'
+        ORDER BY mte.media_id
+        """,
+        (model_name,),
+    ).fetchall()
+
+    if not rows and not text_rows:
+        entry = _EmbedCache(
+            count=count,
+            text_count=count_text,
+            media_ids=[],
+            vecs=np.empty((0, 0), dtype=np.float32),
+            text_media_ids=[],
+            text_vecs=np.empty((0, 0), dtype=np.float32),
+            meta={},
+        )
         _cache[model_name] = entry
         return entry
 
-    dim = rows[0]["dim"]
-    expected_bytes = dim * 4
-    if len(rows[0]["vector"]) != expected_bytes:
-        raise RuntimeError(
-            f"frame_embeddings dtype mismatch for model {model_name!r}: "
-            f"dim={dim} expects {expected_bytes} bytes but blob is {len(rows[0]['vector'])} bytes"
-        )
-    vecs = np.frombuffer(b"".join(r["vector"] for r in rows), dtype=np.float32).reshape(len(rows), dim).copy()
-    media_ids = [r["media_id"] for r in rows]
-    meta = {r["media_id"]: r for r in rows}
+    meta: dict[int, Any] = {}
+    media_ids: list[int] = []
+    vecs = np.empty((0, 0), dtype=np.float32)
+    if rows:
+        dim = rows[0]["dim"]
+        expected_bytes = dim * 4
+        if len(rows[0]["vector"]) != expected_bytes:
+            raise RuntimeError(
+                f"frame_embeddings dtype mismatch for model {model_name!r}: "
+                f"dim={dim} expects {expected_bytes} bytes but blob is {len(rows[0]['vector'])} bytes"
+            )
+        vecs = np.frombuffer(b"".join(r["vector"] for r in rows), dtype=np.float32).reshape(len(rows), dim).copy()
+        media_ids = [r["media_id"] for r in rows]
+        meta.update({r["media_id"]: r for r in rows})
 
-    entry = _EmbedCache(count=count, media_ids=media_ids, vecs=vecs, meta=meta)
+    text_media_ids: list[int] = []
+    text_vecs = np.empty((0, 0), dtype=np.float32)
+    if text_rows:
+        text_dim = text_rows[0]["dim"]
+        expected_bytes = text_dim * 4
+        if len(text_rows[0]["vector"]) != expected_bytes:
+            raise RuntimeError(
+                f"media_text_embeddings dtype mismatch for model {model_name!r}: "
+                f"dim={text_dim} expects {expected_bytes} bytes but blob is {len(text_rows[0]['vector'])} bytes"
+            )
+        text_vecs = np.frombuffer(b"".join(r["vector"] for r in text_rows), dtype=np.float32).reshape(len(text_rows), text_dim).copy()
+        text_media_ids = [r["media_id"] for r in text_rows]
+        if text_media_ids:
+            extra = conn.execute(
+                """
+                SELECT id AS media_id, tg_document_id, media_kind, sticker_format,
+                       local_path, bot_file_id, bot_send_method, bot_cache_status,
+                       set_short_name, set_title, emoji, is_favorite, is_recent
+                FROM media_items
+                WHERE id IN (%s)
+                """ % ",".join("?" for _ in text_media_ids),
+                text_media_ids,
+            ).fetchall()
+            meta.update({r["media_id"]: r for r in extra})
+
+    entry = _EmbedCache(
+        count=count,
+        text_count=count_text,
+        media_ids=media_ids,
+        vecs=vecs,
+        text_media_ids=text_media_ids,
+        text_vecs=text_vecs,
+        meta=meta,
+    )
     _cache[model_name] = entry
     return entry
 
-
-# ---------------------------------------------------------------------------
-# FTS5 + RRF helpers
-# ---------------------------------------------------------------------------
 
 _FTS_SPECIAL = re.compile(r'["\'\+\-\*\(\)\:\^]')
 
 
 def _fts_query_str(query: str) -> str | None:
-    """Convert user query to a safe FTS5 MATCH expression with prefix matching."""
     clean = _FTS_SPECIAL.sub(" ", query)
     words = [w for w in clean.split() if w]
     if not words:
@@ -129,11 +180,6 @@ def _fts_query_str(query: str) -> str | None:
 
 
 def _fts_ranked_ids(query: str, candidate_ids: set[int]) -> list[int]:
-    """
-    FTS5 BM25 search over set_title / set_short_name / emoji.
-    Returns media_ids in BM25 order (best first), filtered to candidate_ids.
-    Returns [] on FTS parse error or no match — caller falls back to vector-only.
-    """
     fts_q = _fts_query_str(query)
     if not fts_q:
         return []
@@ -148,11 +194,6 @@ def _fts_ranked_ids(query: str, candidate_ids: set[int]) -> list[int]:
 
 
 def _ocr_fts_ranked_ids(query: str, candidate_ids: set[int]) -> list[int]:
-    """
-    FTS5 BM25 search over OCR-extracted text (media_ocr_fts).
-    Query is normalized the same way as stored OCR text (ё→е, lowercase, etc.).
-    Returns [] when no OCR text is indexed or on error.
-    """
     norm_q = _ocr_normalize(query)
     fts_q = _fts_query_str(norm_q)
     if not fts_q:
@@ -168,7 +209,6 @@ def _ocr_fts_ranked_ids(query: str, candidate_ids: set[int]) -> list[int]:
 
 
 def _rrf_fuse_weighted(lists: list[tuple[list[int], float]], k: int = 60) -> dict[int, float]:
-    """Weighted RRF: score += weight / (k + rank) per list."""
     scores: dict[int, float] = {}
     for ranked, weight in lists:
         for rank, mid in enumerate(ranked, start=1):
@@ -176,18 +216,44 @@ def _rrf_fuse_weighted(lists: list[tuple[list[int], float]], k: int = 60) -> dic
     return scores
 
 
-def _rrf_fuse(lists: list[list[int]], k: int = 60) -> dict[int, float]:
-    return _rrf_fuse_weighted([(lst, 1.0) for lst in lists], k)
+def _is_text_like_query(query: str) -> bool:
+    tokens = [t for t in re.split(r"\s+", query.strip()) if t]
+    if not tokens:
+        return False
+    alpha_tokens = [t for t in tokens if any(ch.isalpha() for ch in t)]
+    return bool(alpha_tokens)
 
 
-# ---------------------------------------------------------------------------
-# Main search entry point
-# ---------------------------------------------------------------------------
+def _semantic_only_should_return_empty(
+    query: str,
+    *,
+    best_sem: float,
+    second_sem: float,
+    best_image_sem: float,
+    best_text_sem: float,
+) -> bool:
+    token_count = len([t for t in re.split(r"\s+", query.strip()) if t])
+
+    if best_sem < 0.18:
+        return True
+    if best_sem < 0.24 and (best_sem - second_sem) < 0.015:
+        return True
+
+    if not _is_text_like_query(query):
+        return False
+
+    # OCR-text semantic matches are much noisier than lexical hits. For pure
+    # semantic-only queries, be stricter when neither the image leg nor the
+    # text-semantic leg is convincingly strong.
+    if token_count >= 4 and best_text_sem < 0.93 and best_image_sem < 0.20:
+        return True
+    if token_count <= 3 and best_text_sem < 0.82 and best_image_sem < 0.14:
+        return True
+
+    return False
+
 
 def search(query: str, top_k: int | None = None) -> list[SearchResult]:
-    """
-    Hybrid BM25+vector search with RRF fusion, metadata boosts, dedup, top_k.
-    """
     if top_k is None:
         top_k = config.TOP_K
 
@@ -195,54 +261,82 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
     query_vec = embedder.embed_text(query)
 
     cache = _load(embedder.model_name)
-    if not cache.media_ids:
+    if not cache.media_ids and not cache.text_media_ids:
         return []
 
-    # --- Vector leg ---
-    scores_raw = cache.vecs @ query_vec  # shape (N,)
-    media_best: dict[int, float] = {}
-    for media_id, score in zip(cache.media_ids, scores_raw.tolist()):
-        if media_id not in media_best or score > media_best[media_id]:
-            media_best[media_id] = score
+    image_best: dict[int, float] = {}
+    if cache.media_ids:
+        image_scores = cache.vecs @ query_vec
+        for media_id, score in zip(cache.media_ids, image_scores.tolist()):
+            if media_id not in image_best or score > image_best[media_id]:
+                image_best[media_id] = score
 
-    if not media_best:
+    text_best: dict[int, float] = {}
+    if cache.text_media_ids:
+        text_scores = cache.text_vecs @ query_vec
+        for media_id, score in zip(cache.text_media_ids, text_scores.tolist()):
+            if media_id not in text_best or score > text_best[media_id]:
+                text_best[media_id] = score
+
+    candidate_ids = set(image_best) | set(text_best)
+    if not candidate_ids:
         return []
 
-    vec_ranked = sorted(media_best, key=lambda mid: media_best[mid], reverse=True)
+    vec_ranked = sorted(image_best, key=lambda mid: image_best[mid], reverse=True)
+    ocr_sem_ranked = sorted(text_best, key=lambda mid: text_best[mid], reverse=True)
 
-    candidate_ids = set(media_best.keys())
-
-    # --- Lexical legs (FTS5 BM25) ---
     fts_ranked = _fts_ranked_ids(query, candidate_ids)
     ocr_ranked = _ocr_fts_ranked_ids(query, candidate_ids)
 
-    # Short queries (≤3 words): give FTS legs 2× weight — exact text matters more
-    # for meme text, profanity, short labels; abstract queries keep equal weights.
     fts_w = 2.0 if len(query.split()) <= 3 else 1.0
+    text_sem_w = 1.15 if len(query.split()) >= 2 else 1.0
 
-    # --- Fusion ---
-    has_lexical = fts_ranked or ocr_ranked
-    if has_lexical:
-        rrf = _rrf_fuse_weighted([
-            (vec_ranked, 1.0),
-            (fts_ranked, fts_w),
-            (ocr_ranked, fts_w),
-        ])
-        rrf_vals = list(rrf.values())
-        lo, span = min(rrf_vals), (max(rrf_vals) - min(rrf_vals)) or 1.0
+    semantic_lists: list[tuple[list[int], float]] = []
+    if vec_ranked:
+        semantic_lists.append((vec_ranked, 1.0))
+    if ocr_sem_ranked:
+        semantic_lists.append((ocr_sem_ranked, text_sem_w))
+
+    lexical_lists: list[tuple[list[int], float]] = []
+    if fts_ranked:
+        lexical_lists.append((fts_ranked, fts_w))
+    if ocr_ranked:
+        lexical_lists.append((ocr_ranked, fts_w))
+
+    if lexical_lists:
+        rrf = _rrf_fuse_weighted(semantic_lists + lexical_lists)
+        vals = list(rrf.values())
+        lo, span = min(vals), (max(vals) - min(vals)) or 1.0
         base_scores = {mid: (rrf[mid] - lo) / span for mid in rrf}
     else:
-        # FTS returned nothing (abstract query) — pure vector path, no regression
-        raw_vals = list(media_best.values())
-        lo, span = min(raw_vals), (max(raw_vals) - min(raw_vals)) or 1.0
-        base_scores = {mid: (media_best[mid] - lo) / span for mid in media_best}
+        semantic_base = dict(image_best)
+        for media_id, score in text_best.items():
+            semantic_base[media_id] = max(score, semantic_base.get(media_id, score))
 
-    # --- Metadata boosts ---
+        ranked_sem = sorted(semantic_base.items(), key=lambda kv: kv[1], reverse=True)
+        best_sem = ranked_sem[0][1]
+        second_sem = ranked_sem[1][1] if len(ranked_sem) > 1 else -1.0
+        best_image_sem = max(image_best.values()) if image_best else -1.0
+        best_text_sem = max(text_best.values()) if text_best else -1.0
+        if _semantic_only_should_return_empty(
+            query,
+            best_sem=best_sem,
+            second_sem=second_sem,
+            best_image_sem=best_image_sem,
+            best_text_sem=best_text_sem,
+        ):
+            return []
+
+        vals = list(semantic_base.values())
+        lo, span = min(vals), (max(vals) - min(vals)) or 1.0
+        base_scores = {mid: (semantic_base[mid] - lo) / span for mid in semantic_base}
+
     query_lower = query.lower()
     results: list[SearchResult] = []
-
     for media_id, base in base_scores.items():
-        row = cache.meta[media_id]
+        row = cache.meta.get(media_id)
+        if row is None:
+            continue
         score = base
 
         if row["is_favorite"]:
@@ -280,7 +374,6 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
 
     results.sort(key=lambda r: r.score, reverse=True)
 
-    # Group: max 3 results per sticker set
     set_count: dict[str, int] = {}
     deduped: list[SearchResult] = []
     for r in results:

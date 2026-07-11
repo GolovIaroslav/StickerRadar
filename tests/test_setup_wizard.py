@@ -8,6 +8,7 @@ import pytest
 
 def _reload_config_module(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STICKERRADAR_ENV_FILE", str(tmp_path / ".env"))
     for key in [
         "TG_API_ID",
         "TG_API_HASH",
@@ -36,6 +37,18 @@ def test_config_import_allows_missing_credentials(monkeypatch, tmp_path):
 
     with pytest.raises(config.ConfigError):
         config.require_bot_runtime_config()
+
+
+def test_relative_paths_in_env_resolve_from_env_file_directory(monkeypatch, tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("DATA_DIR=./data\nSESSION_PATH=./data/sessions/user\nDB_PATH=./data/app.sqlite\n", encoding="utf-8")
+
+    config = _reload_config_module(monkeypatch, tmp_path)
+
+    assert config.ENV_FILE == env_path.resolve()
+    assert config.DATA_DIR == (tmp_path / "data").resolve()
+    assert config.SESSION_PATH == (tmp_path / "data" / "sessions" / "user").resolve()
+    assert config.DB_PATH == (tmp_path / "data" / "app.sqlite").resolve()
 
 
 def test_update_env_text_updates_and_appends_keys():
@@ -74,7 +87,7 @@ def test_runtime_profile_recommendation_prefers_lightweight_models_without_gpu()
     ocr = choose_default_ocr_profile(runtime)
 
     assert embedding.key == "google/siglip2-base-patch16-224"
-    assert ocr.key == "rapidocr"
+    assert ocr.key == "off"
 
 
 def test_runtime_profile_recommendation_prefers_siglip2_base_on_typical_6gb_gpu():
@@ -117,12 +130,12 @@ def test_runtime_profile_recommendation_prefers_easyocr_when_gpu_is_available():
         gpu_name="RTX 3060",
         gpu_total_gb=6.0,
         gpu_free_gb=3.0,
-        llama_cpp_available=True,
+        llama_cpp_available=False,
         ffmpeg_available=True,
     )
 
     ocr = choose_default_ocr_profile(runtime)
-    assert ocr.key == "easyocr"
+    assert ocr.key == "off"
 
 
 def test_quick_setup_keeps_llm_fallback_disabled_even_when_llama_is_available(monkeypatch, tmp_path):
@@ -179,5 +192,5 @@ def test_quick_setup_enables_easyocr_gpu_on_gpu_hosts(monkeypatch, tmp_path):
 
     wizard.run_setup_wizard(quick=True)
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "OCR_BACKEND=easyocr" in env_text
-    assert "OCR_USE_GPU=true" in env_text
+    assert "OCR_ENABLED=false" in env_text
+    assert "OCR_USE_GPU=false" in env_text

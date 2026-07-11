@@ -8,7 +8,14 @@ from dotenv import load_dotenv
 from app.errors import ConfigError
 
 
-ENV_FILE = Path(".env")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _resolve_env_file() -> Path:
+    return Path(os.environ.get("STICKERRADAR_ENV_FILE", str(PROJECT_ROOT / ".env"))).expanduser().resolve()
+
+
+ENV_FILE = _resolve_env_file()
 
 
 def load_env(*, override: bool = False) -> None:
@@ -34,6 +41,14 @@ def _str(name: str, default: str) -> str:
 
 def _optional_str(name: str) -> str:
     return os.environ.get(name, "").strip()
+
+
+def _path(name: str, default: Path) -> Path:
+    raw = os.environ.get(name, "").strip()
+    path = Path(raw).expanduser() if raw else default
+    if not path.is_absolute():
+        path = (ENV_FILE.parent / path).resolve()
+    return path
 
 
 def _int(name: str, default: int) -> int:
@@ -96,6 +111,9 @@ EVAL_DIR: Path
 # ---------------------------------------------------------------------------
 
 MODEL_NAME: str
+MODEL_ROOT: Path
+MODEL_AUTO_DOWNLOAD: bool
+EMBEDDING_MODEL_PATH: str
 
 # ---------------------------------------------------------------------------
 # Runtime
@@ -113,15 +131,20 @@ MODEL_IDLE_UNLOAD_SEC: int
 
 ENABLE_CAPTIONS: bool
 CAPTION_PROVIDER: str
+VLM_ENABLED: bool
+VLM_BACKEND: str
+VLM_MODEL_PATH: str
 OCR_ENABLED: bool
 OCR_BACKEND: str
 OCR_USE_GPU: bool
 OCR_LANGS: str
 OCR_LLM_REPO: str
+OCR_MODEL_PATH: str
 OCR_FALLBACK_ENABLED: bool
 OCR_FALLBACK_BACKEND: str
 OCR_FALLBACK_CONFIDENCE: float
 OCR_FALLBACK_MIN_CHARS: int
+OCR_GLM_PREFILTER_BACKEND: str
 ALLOW_REMOTE_CODE: bool
 SETUP_WIZARD_COMPLETED: bool
 
@@ -135,6 +158,8 @@ def _float(name: str, default: float) -> float:
 
 
 def reload() -> None:
+    global ENV_FILE
+    ENV_FILE = _resolve_env_file()
     load_env(override=True)
     _assign_from_env()
 
@@ -143,10 +168,11 @@ def _assign_from_env() -> None:
     global TG_API_ID, TG_API_HASH, BOT_TOKEN, OWNER_USER_ID
     global IMAGE_MODEL_NAME, DEVICE
     global DATA_DIR, SESSION_PATH, DB_PATH, MEDIA_DIR, PREVIEWS_DIR, LOGS_DIR, EVAL_DIR
-    global MODEL_NAME
+    global MODEL_NAME, MODEL_ROOT, MODEL_AUTO_DOWNLOAD, EMBEDDING_MODEL_PATH
     global TOP_K, FRAME_COUNT, SCAN_CONCURRENCY, BOT_SEND_DELAY_MS, MODEL_IDLE_UNLOAD_SEC
-    global ENABLE_CAPTIONS, CAPTION_PROVIDER, OCR_ENABLED, OCR_BACKEND, OCR_USE_GPU, OCR_LANGS, OCR_LLM_REPO
-    global OCR_FALLBACK_ENABLED, OCR_FALLBACK_BACKEND, OCR_FALLBACK_CONFIDENCE, OCR_FALLBACK_MIN_CHARS
+    global ENABLE_CAPTIONS, CAPTION_PROVIDER, VLM_ENABLED, VLM_BACKEND, VLM_MODEL_PATH
+    global OCR_ENABLED, OCR_BACKEND, OCR_USE_GPU, OCR_LANGS, OCR_LLM_REPO, OCR_MODEL_PATH
+    global OCR_FALLBACK_ENABLED, OCR_FALLBACK_BACKEND, OCR_FALLBACK_CONFIDENCE, OCR_FALLBACK_MIN_CHARS, OCR_GLM_PREFILTER_BACKEND
     global ALLOW_REMOTE_CODE, SETUP_WIZARD_COMPLETED
 
     TG_API_ID = _optional_int("TG_API_ID")
@@ -157,9 +183,9 @@ def _assign_from_env() -> None:
     IMAGE_MODEL_NAME = _str("IMAGE_MODEL_NAME", "")
     DEVICE = _str("DEVICE", "auto")
 
-    DATA_DIR = Path(_str("DATA_DIR", "./data")).resolve()
-    SESSION_PATH = Path(_str("SESSION_PATH", str(DATA_DIR / "sessions" / "user"))).resolve()
-    DB_PATH = Path(_str("DB_PATH", str(DATA_DIR / "app.sqlite"))).resolve()
+    DATA_DIR = _path("DATA_DIR", PROJECT_ROOT / "data")
+    SESSION_PATH = _path("SESSION_PATH", DATA_DIR / "sessions" / "user")
+    DB_PATH = _path("DB_PATH", DATA_DIR / "app.sqlite")
 
     MEDIA_DIR = DATA_DIR / "media"
     PREVIEWS_DIR = DATA_DIR / "previews"
@@ -167,6 +193,9 @@ def _assign_from_env() -> None:
     EVAL_DIR = DATA_DIR / "eval"
 
     MODEL_NAME = _str("MODEL_NAME", "google/siglip2-large-patch16-256")
+    MODEL_ROOT = _path("MODEL_ROOT", DATA_DIR / "models")
+    MODEL_AUTO_DOWNLOAD = _bool("MODEL_AUTO_DOWNLOAD", False)
+    EMBEDDING_MODEL_PATH = _optional_str("EMBEDDING_MODEL_PATH")
 
     TOP_K = _int("TOP_K", 10)
     FRAME_COUNT = _int("FRAME_COUNT", 5)
@@ -176,15 +205,20 @@ def _assign_from_env() -> None:
 
     ENABLE_CAPTIONS = _bool("ENABLE_CAPTIONS", False)
     CAPTION_PROVIDER = _str("CAPTION_PROVIDER", "none")
-    OCR_ENABLED = _bool("OCR_ENABLED", True)
-    OCR_BACKEND = _str("OCR_BACKEND", "easyocr")
+    VLM_ENABLED = _bool("VLM_ENABLED", False)
+    VLM_BACKEND = _str("VLM_BACKEND", "none")
+    VLM_MODEL_PATH = _optional_str("VLM_MODEL_PATH")
+    OCR_ENABLED = _bool("OCR_ENABLED", False)
+    OCR_BACKEND = _str("OCR_BACKEND", "off")
     OCR_USE_GPU = _bool("OCR_USE_GPU", False)
     OCR_LANGS = _str("OCR_LANGS", "ru,en")
     OCR_LLM_REPO = _str("OCR_LLM_REPO", "ggml-org/GLM-OCR-GGUF:Q8_0")
+    OCR_MODEL_PATH = _optional_str("OCR_MODEL_PATH")
     OCR_FALLBACK_ENABLED = _bool("OCR_FALLBACK_ENABLED", False)
     OCR_FALLBACK_BACKEND = _str("OCR_FALLBACK_BACKEND", "glm-ocr")
     OCR_FALLBACK_CONFIDENCE = _float("OCR_FALLBACK_CONFIDENCE", 0.45)
     OCR_FALLBACK_MIN_CHARS = _int("OCR_FALLBACK_MIN_CHARS", 3)
+    OCR_GLM_PREFILTER_BACKEND = _str("OCR_GLM_PREFILTER_BACKEND", "auto")
     ALLOW_REMOTE_CODE = _bool("ALLOW_REMOTE_CODE", False)
     SETUP_WIZARD_COMPLETED = _bool("SETUP_WIZARD_COMPLETED", False)
 

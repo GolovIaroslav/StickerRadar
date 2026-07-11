@@ -107,7 +107,7 @@ uv run python -m app setup
 It helps the user choose:
 
 - the **embedding model** (with approximate size and license notes)
-- the **OCR profile** (fast classic OCR vs slower VLM-style OCR)
+- the **OCR profile** (GLM hybrid-rescue by default when `llama-cli` is available, with lighter classic OCR options still available)
 - the best **device** (`auto`, `cpu`, `cuda`) based on detected hardware
 
 Current built-in OCR guidance comes from local tests on **20 real StickerRadar stickers**:
@@ -115,7 +115,7 @@ Current built-in OCR guidance comes from local tests on **20 real StickerRadar s
 - **EasyOCR + GPU** — best default here (~161 ms/image, best Russian accuracy)
 - **EasyOCR + CPU** — same quality, much slower (~611 ms/image)
 - **RapidOCR + CPU** — lower RAM and no GPU required, but much weaker on Russian meme text (~302 ms/image)
-- **GLM-OCR** — useful only as an optional rescue pass (~3973 ms/image, can over-read extra text)
+- **GLM-OCR** — useful as a gated rescue pass after a fast detector says text is present but confidence is weak; brute-forcing every image is too slow
 
 It also creates or updates `.env`, and it can be skipped quickly if the user
 already knows what they want. If someone runs `login`, `sync`, or `run` before
@@ -173,11 +173,14 @@ uv run python -m app <command>
 | Command | Description |
 |---|---|
 | `login [--method qr\|phone]` | Authenticate Telegram account |
-| `sync` | Run the full pipeline: metadata, download, preview, embed |
+| `sync` | Run the full pipeline: metadata, download, preview, OCR, image embed, OCR-text embed |
 | `sync --metadata` | Metadata stage only |
 | `sync --download` | Download stage only |
 | `sync --preview` | Preview extraction only |
-| `sync --embed` | Embedding stage only |
+| `sync --ocr` | OCR stage only |
+| `sync --embed` | Image embedding stage only |
+| `sync --ocr-text-embed` | Backfill semantic OCR-text embeddings from persisted OCR text |
+| `sync --reocr` | Safe batched re-OCR/re-embed pass for the existing local library; with `OCR_BACKEND=glm-ocr` it now prefilters frames and sends only low-confidence text-like cases into GLM |
 | `sync --reindex` | Re-extract previews and re-embed everything (after changing `FRAME_COUNT`) |
 | `sync --frames N` | Override frame count for this run |
 | `sync --keep-previews` | Don't auto-delete preview frames after embedding |
@@ -215,7 +218,9 @@ Re-running `sync` is safe and efficient. The pipeline only processes items that 
 - Removed a pack from Telegram? The local copy stays (use `stats` to track disk usage).
 - Existing items with `download_status=ok` are never re-downloaded.
 
-**Changing the model is automatic:** if you switch `MODEL_NAME` and run `sync`, StickerRadar detects that existing items have no vectors for the new model and re-embeds them (using the kept media, no re-download). If the model is unchanged, only genuinely new items are processed.
+**Changing the model is explicit:** install the selected model artifact first with
+`python -m app model install ... --yes`, then switch `MODEL_NAME` and run `sync`.
+Runtime never downloads model weights, even during `sync`.
 
 To force a full rebuild after changing `FRAME_COUNT` (frame structure changes):
 
@@ -325,7 +330,7 @@ Measured on this project with **20 random real stickers** (same seed across runs
 | `easyocr` | GPU | ~300 MB download, ~469 MB observed VRAM delta | ~161 ms/image | Best overall balance here; strongest Russian sticker-text accuracy |
 | `easyocr` | CPU | ~300 MB download, ~1.3 GB RAM peak | ~611 ms/image | Same quality as GPU, but much slower |
 | `rapidocr` | CPU | ~150–250 MB assets, ~261 MB RAM peak | ~302 ms/image | Lower overhead, but often transliterates or mangles Cyrillic |
-| `glm-ocr` | GPU + llama.cpp | ~1.43 GB GGUF + mmproj | ~3973 ms/image | Can rescue some hard images, but often over-reads extra text; not recommended as bulk default |
+| `glm-ocr` | GPU + llama.cpp | ~1.43 GB GGUF + mmproj | historically ~3973 ms/image when brute-forced; now used as gated rescue pass | Best reserved for low-confidence text-like frames after a cheap detector, not for every sticker |
 
 Practical recommendation:
 

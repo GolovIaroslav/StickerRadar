@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS media_items (
   embed_status    TEXT DEFAULT 'pending',
   ocr_status      TEXT DEFAULT 'pending',
   ocr_text        TEXT,                    -- aggregated normalized OCR text from all frames
+  ocr_backend     TEXT,
+  ocr_model_ref   TEXT,
+  ocr_pipeline_version TEXT,
+  ocr_generated_at TEXT,
   last_error      TEXT,
 
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -84,10 +88,28 @@ CREATE TABLE IF NOT EXISTS frame_embeddings (
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS media_text_embeddings (
+  media_id    INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
+  model_name  TEXT NOT NULL,
+  dim         INTEGER NOT NULL,
+  vector      BLOB NOT NULL,
+  source_text TEXT,
+  created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS app_state (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sent_media_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT NOT NULL,
+  media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+  sent_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_sent_media_chat_time ON sent_media_history(chat_id, sent_at);
 
 CREATE INDEX IF NOT EXISTS idx_media_sources    ON media_items(is_installed, is_favorite, is_recent, is_saved_gif);
 CREATE INDEX IF NOT EXISTS idx_media_set        ON media_items(set_short_name);
@@ -96,6 +118,7 @@ CREATE INDEX IF NOT EXISTS idx_media_prev_status ON media_items(preview_status);
 CREATE INDEX IF NOT EXISTS idx_media_emb_status ON media_items(embed_status);
 CREATE INDEX IF NOT EXISTS idx_media_ocr_status ON media_items(ocr_status);
 CREATE INDEX IF NOT EXISTS idx_frame_emb_model  ON frame_embeddings(model_name);
+CREATE INDEX IF NOT EXISTS idx_media_text_emb_model ON media_text_embeddings(model_name);
 
 -- FTS5 full-text index over sticker metadata for hybrid BM25+vector search.
 CREATE VIRTUAL TABLE IF NOT EXISTS media_fts USING fts5(
@@ -126,7 +149,11 @@ CREATE TABLE IF NOT EXISTS frame_ocr (
   frame_id   INTEGER PRIMARY KEY REFERENCES media_frames(id) ON DELETE CASCADE,
   raw_text   TEXT NOT NULL DEFAULT '',
   norm_text  TEXT NOT NULL DEFAULT '',
-  confidence REAL NOT NULL DEFAULT 0.0
+  confidence REAL NOT NULL DEFAULT 0.0,
+  backend    TEXT,
+  model_ref  TEXT,
+  pipeline_version TEXT,
+  generated_at TEXT
 );
 
 -- Separate FTS5 for OCR text — kept separate from media_fts so no migration
@@ -176,6 +203,55 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "ocr_text" not in existing:
         conn.execute("ALTER TABLE media_items ADD COLUMN ocr_text TEXT")
         changed = True
+    if "ocr_backend" not in existing:
+        conn.execute("ALTER TABLE media_items ADD COLUMN ocr_backend TEXT")
+        changed = True
+    if "ocr_model_ref" not in existing:
+        conn.execute("ALTER TABLE media_items ADD COLUMN ocr_model_ref TEXT")
+        changed = True
+    if "ocr_pipeline_version" not in existing:
+        conn.execute("ALTER TABLE media_items ADD COLUMN ocr_pipeline_version TEXT")
+        changed = True
+    if "ocr_generated_at" not in existing:
+        conn.execute("ALTER TABLE media_items ADD COLUMN ocr_generated_at TEXT")
+        changed = True
+
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS frame_ocr (
+          frame_id   INTEGER PRIMARY KEY REFERENCES media_frames(id) ON DELETE CASCADE,
+          raw_text   TEXT NOT NULL DEFAULT '',
+          norm_text  TEXT NOT NULL DEFAULT '',
+          confidence REAL NOT NULL DEFAULT 0.0,
+          backend    TEXT,
+          model_ref  TEXT,
+          pipeline_version TEXT,
+          generated_at TEXT
+        )"""
+    )
+    frame_ocr_cols = {r[1] for r in conn.execute("PRAGMA table_info(frame_ocr)")}
+    if "backend" not in frame_ocr_cols:
+        conn.execute("ALTER TABLE frame_ocr ADD COLUMN backend TEXT")
+        changed = True
+    if "model_ref" not in frame_ocr_cols:
+        conn.execute("ALTER TABLE frame_ocr ADD COLUMN model_ref TEXT")
+        changed = True
+    if "pipeline_version" not in frame_ocr_cols:
+        conn.execute("ALTER TABLE frame_ocr ADD COLUMN pipeline_version TEXT")
+        changed = True
+    if "generated_at" not in frame_ocr_cols:
+        conn.execute("ALTER TABLE frame_ocr ADD COLUMN generated_at TEXT")
+        changed = True
+
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS media_text_embeddings (
+          media_id    INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
+          model_name  TEXT NOT NULL,
+          dim         INTEGER NOT NULL,
+          vector      BLOB NOT NULL,
+          source_text TEXT,
+          created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+        )"""
+    )
     if changed:
         conn.commit()
 
@@ -198,6 +274,37 @@ def close() -> None:
     if conn:
         conn.close()
         _local.conn = None
+
+
+def record_sent_media(chat_id: int | str, media_id: int) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO sent_media_history(chat_id, media_id) VALUES (?, ?)",
+        (str(chat_id), media_id),
+    )
+    conn.commit()
+
+
+def recent_sent_media(chat_id: int | str, *, limit: int = 100, days: int = 7) -> set[int]:
+    rows = get_conn().execute(
+        """SELECT media_id FROM sent_media_history
+           WHERE chat_id=? AND sent_at >= datetime('now', ?)
+           ORDER BY sent_at DESC LIMIT ?""",
+        (str(chat_id), f"-{max(1, days)} days", max(1, limit)),
+    ).fetchall()
+    return {int(row["media_id"]) for row in rows}
+
+
+def recent_sent_packs(chat_id: int | str, *, limit: int = 100, days: int = 7) -> set[str]:
+    rows = get_conn().execute(
+        """SELECT mi.set_short_name FROM sent_media_history sh
+           JOIN media_items mi ON mi.id=sh.media_id
+           WHERE sh.chat_id=? AND sh.sent_at >= datetime('now', ?)
+             AND mi.set_short_name IS NOT NULL
+           GROUP BY mi.set_short_name ORDER BY MAX(sh.sent_at) DESC LIMIT ?""",
+        (str(chat_id), f"-{max(1, days)} days", max(1, limit)),
+    ).fetchall()
+    return {str(row["set_short_name"]) for row in rows if row["set_short_name"]}
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +480,11 @@ def upsert_frame(
 
 
 def upsert_frame_embedding(
-    *, frame_id: int, model_name: str, dim: int, vector_bytes: bytes
+    *,
+    frame_id: int,
+    model_name: str,
+    dim: int,
+    vector_bytes: bytes,
 ) -> None:
     conn = get_conn()
     conn.execute(
@@ -387,6 +498,31 @@ def upsert_frame_embedding(
             created_at=CURRENT_TIMESTAMP
         """,
         (frame_id, model_name, dim, vector_bytes),
+    )
+    conn.commit()
+
+
+def upsert_media_text_embedding(
+    *,
+    media_id: int,
+    model_name: str,
+    dim: int,
+    vector_bytes: bytes,
+    source_text: str,
+) -> None:
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO media_text_embeddings (media_id, model_name, dim, vector, source_text)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(media_id) DO UPDATE SET
+            model_name=excluded.model_name,
+            dim=excluded.dim,
+            vector=excluded.vector,
+            source_text=excluded.source_text,
+            created_at=CURRENT_TIMESTAMP
+        """,
+        (media_id, model_name, dim, vector_bytes, source_text),
     )
     conn.commit()
 
@@ -482,6 +618,29 @@ def count_embeddings_for_model(model_name: str) -> int:
     ).fetchone()[0]
 
 
+def count_text_embeddings_for_model(model_name: str) -> int:
+    return get_conn().execute(
+        "SELECT COUNT(*) FROM media_text_embeddings WHERE model_name=?", (model_name,)
+    ).fetchone()[0]
+
+
+def list_media_missing_text_embeddings(model_name: str, limit: int = 100) -> list[sqlite3.Row]:
+    return get_conn().execute(
+        """
+        SELECT mi.*
+        FROM media_items mi
+        LEFT JOIN media_text_embeddings mte
+          ON mte.media_id = mi.id AND mte.model_name = ?
+        WHERE mi.ocr_status='ok'
+          AND COALESCE(mi.ocr_text, '') <> ''
+          AND (mte.media_id IS NULL OR COALESCE(mte.source_text, '') <> COALESCE(mi.ocr_text, ''))
+        ORDER BY mi.id
+        LIMIT ?
+        """,
+        (model_name, limit),
+    ).fetchall()
+
+
 def list_prunable_media() -> list[sqlite3.Row]:
     """Items whose bot_file_id is cached AND still have a local media file."""
     return get_conn().execute(
@@ -518,24 +677,54 @@ def list_pending_embeddings(limit: int = 100) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def upsert_frame_ocr(frame_id: int, raw_text: str, norm_text: str, confidence: float) -> None:
+def upsert_frame_ocr(
+    frame_id: int,
+    raw_text: str,
+    norm_text: str,
+    confidence: float,
+    *,
+    backend: str | None = None,
+    model_ref: str | None = None,
+    pipeline_version: str | None = None,
+) -> None:
     conn = get_conn()
     conn.execute(
-        """INSERT INTO frame_ocr (frame_id, raw_text, norm_text, confidence)
-           VALUES (?, ?, ?, ?)
+        """INSERT INTO frame_ocr (
+               frame_id, raw_text, norm_text, confidence, backend, model_ref, pipeline_version, generated_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
            ON CONFLICT(frame_id) DO UPDATE SET
                raw_text=excluded.raw_text,
                norm_text=excluded.norm_text,
-               confidence=excluded.confidence""",
-        (frame_id, raw_text, norm_text, confidence),
+               confidence=excluded.confidence,
+               backend=excluded.backend,
+               model_ref=excluded.model_ref,
+               pipeline_version=excluded.pipeline_version,
+               generated_at=CURRENT_TIMESTAMP""",
+        (frame_id, raw_text, norm_text, confidence, backend, model_ref, pipeline_version),
     )
     conn.commit()
 
 
-def mark_ocr_ok(media_id: int, ocr_text: str) -> None:
+def mark_ocr_ok(
+    media_id: int,
+    ocr_text: str,
+    *,
+    backend: str | None = None,
+    model_ref: str | None = None,
+    pipeline_version: str | None = None,
+) -> None:
     get_conn().execute(
-        "UPDATE media_items SET ocr_status='ok', ocr_text=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        (ocr_text or None, media_id),
+        """UPDATE media_items
+           SET ocr_status='ok',
+               ocr_text=?,
+               ocr_backend=?,
+               ocr_model_ref=?,
+               ocr_pipeline_version=?,
+               ocr_generated_at=CURRENT_TIMESTAMP,
+               updated_at=CURRENT_TIMESTAMP
+         WHERE id=?""",
+        (ocr_text or None, backend, model_ref, pipeline_version, media_id),
     )
     get_conn().commit()
 
@@ -546,6 +735,35 @@ def mark_ocr_failed(media_id: int, error: str) -> None:
         (error, media_id),
     )
     get_conn().commit()
+
+
+def force_reocr() -> int:
+    """Drop frame-level OCR payloads and reset OCR state for previewed items."""
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM frame_ocr WHERE frame_id IN (SELECT id FROM media_frames)"
+    )
+    conn.execute(
+        "DELETE FROM media_text_embeddings WHERE media_id IN (SELECT id FROM media_items WHERE preview_status='ok')"
+    )
+    conn.execute(
+        """
+        UPDATE media_items
+        SET ocr_status='pending',
+            ocr_text=NULL,
+            ocr_backend=NULL,
+            ocr_model_ref=NULL,
+            ocr_pipeline_version=NULL,
+            ocr_generated_at=NULL,
+            last_error=NULL,
+            updated_at=CURRENT_TIMESTAMP
+        WHERE preview_status='ok'
+        """
+    )
+    conn.commit()
+    return conn.execute(
+        "SELECT COUNT(*) FROM media_items WHERE preview_status='ok' AND ocr_status='pending'"
+    ).fetchone()[0]
 
 
 def list_pending_ocr(limit: int = 100) -> list[sqlite3.Row]:

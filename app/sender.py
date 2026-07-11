@@ -108,10 +108,23 @@ async def send_results(
     if delay_ms is None:
         delay_ms = config.BOT_SEND_DELAY_MS
 
+    recent_ids = db.recent_sent_media(chat_id)
+    recent_packs = db.recent_sent_packs(chat_id)
+    seen_ids: set[int] = set()
+    seen_packs: set[str] = set()
     sent = 0
     for result in results:
+        pack = result.set_short_name or ""
+        if result.media_id in recent_ids or result.media_id in seen_ids:
+            continue
+        if pack and (pack in recent_packs or pack in seen_packs):
+            continue
         ok = await send_result(bot, chat_id, result)
         if ok:
+            db.record_sent_media(chat_id, result.media_id)
+            seen_ids.add(result.media_id)
+            if pack:
+                seen_packs.add(pack)
             sent += 1
         if delay_ms > 0:
             await asyncio.sleep(delay_ms / 1000)

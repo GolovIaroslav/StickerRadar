@@ -157,6 +157,44 @@ def _interactive_sync_config() -> bool:
                 config.OCR_USE_GPU = False
 
 
+def _run_reocr_in_safe_batches(
+    *,
+    config,
+    db,
+    run_preview,
+    run_ocr,
+    run_embed,
+    run_ocr_text_embed,
+    batch_size: int,
+    preview_workers: int,
+    keep_previews: bool,
+) -> None:
+    original_concurrency = config.SCAN_CONCURRENCY
+    config.SCAN_CONCURRENCY = max(1, preview_workers)
+    try:
+        batch_no = 0
+        while True:
+            has_preview = bool(db.list_pending_previews(1))
+            has_ocr = bool(config.OCR_ENABLED and db.list_pending_ocr(1))
+            has_embed = bool(db.list_pending_embeddings(1))
+            has_text = bool(db.list_media_missing_text_embeddings(config.MODEL_NAME, 1))
+            if not any((has_preview, has_ocr, has_embed, has_text)):
+                break
+
+            batch_no += 1
+            print(f"\n── Safe re-OCR batch {batch_no} (size={batch_size}, preview_workers={config.SCAN_CONCURRENCY}) ──")
+            if has_preview:
+                run_preview(batch_size)
+            if has_ocr:
+                run_ocr(batch_size)
+            if has_embed:
+                run_embed(batch_size, keep_previews=keep_previews)
+            if has_text:
+                run_ocr_text_embed(batch_size)
+    finally:
+        config.SCAN_CONCURRENCY = original_concurrency
+
+
 def cmd_sync(args: argparse.Namespace) -> None:
     from app import config, db
     _apply_profile(args)
@@ -165,7 +203,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if getattr(args, "frames", None):
         config.FRAME_COUNT = args.frames
 
-    from app.scanner import _run_metadata_sync, _run_download, _run_preview, _run_ocr, _run_embed
+    from app.scanner import _run_metadata_sync, _run_download, _run_preview, _run_ocr, _run_embed, _run_ocr_text_embed
 
     keep_previews = getattr(args, "keep_previews", False)
     limit = getattr(args, "limit", None)
@@ -173,7 +211,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
         getattr(args, "metadata", False),
         getattr(args, "download", False),
         getattr(args, "preview", False),
+        getattr(args, "ocr", False),
         getattr(args, "embed", False),
+        getattr(args, "ocr_text_embed", False),
+        getattr(args, "reocr", False),
     ])
 
     if run_all and not getattr(args, "yes", False):
@@ -186,6 +227,17 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if getattr(args, "reindex", False):
         n = db.force_reindex()
         print(f"Reindex: reset {n} items to re-preview and re-embed.")
+
+    if getattr(args, "reocr", False):
+        n_ocr = db.force_reocr()
+        n_preview = db.force_reindex()
+        print(f"Re-OCR reset: cleared OCR state for {n_ocr} previewed items.")
+        print(f"Re-OCR prep: reset {n_preview} items to re-preview and re-embed.")
+
+    run_preview_stage = run_all or getattr(args, "preview", False) or getattr(args, "reocr", False)
+    run_ocr_stage = (run_all and config.OCR_ENABLED) or getattr(args, "ocr", False) or getattr(args, "reocr", False)
+    run_embed_stage = run_all or getattr(args, "embed", False) or getattr(args, "reocr", False)
+    run_ocr_text_embed_stage = run_all or getattr(args, "ocr_text_embed", False)
 
     try:
         if run_all or getattr(args, "metadata", False):
@@ -200,12 +252,27 @@ def cmd_sync(args: argparse.Namespace) -> None:
             if flagged:
                 print(f"{flagged} item(s) need embeddings for model '{config.MODEL_NAME}'.")
 
-        if run_all or getattr(args, "preview", False):
-            _run_preview(limit)
-        if run_all and config.OCR_ENABLED:
-            _run_ocr(limit)
-        if run_all or getattr(args, "embed", False):
-            _run_embed(limit, keep_previews=keep_previews)
+        if getattr(args, "reocr", False):
+            _run_reocr_in_safe_batches(
+                config=config,
+                db=db,
+                run_preview=_run_preview,
+                run_ocr=_run_ocr,
+                run_embed=_run_embed,
+                run_ocr_text_embed=_run_ocr_text_embed,
+                batch_size=max(1, getattr(args, "reocr_batch_size", 25)),
+                preview_workers=max(1, getattr(args, "reocr_preview_workers", 1)),
+                keep_previews=keep_previews,
+            )
+        else:
+            if run_preview_stage:
+                _run_preview(limit)
+            if run_ocr_stage:
+                _run_ocr(limit)
+            if run_embed_stage:
+                _run_embed(limit, keep_previews=keep_previews)
+            if run_ocr_text_embed_stage:
+                _run_ocr_text_embed(limit)
 
         if run_all:
             _print_stats(config, db, getattr(args, "profile", None) or _read_active_profile())
@@ -330,6 +397,20 @@ def cmd_prune(args: argparse.Namespace) -> None:
     print("These stickers can still be sent via their cached Telegram file_id.")
     db.close()
 
+
+def cmd_model(args: argparse.Namespace) -> None:
+    from app.model_installer import describe, install_artifact, status_lines
+
+    action = getattr(args, "model_action", "status")
+    if action == "status":
+        print("Model artifacts (runtime never downloads):")
+        print("STATUS         ID                               SIZE                     SOURCE")
+        print("─" * 120)
+        print("\n".join(status_lines()))
+    elif action == "describe":
+        describe(args.artifact_id)
+    elif action == "install":
+        raise SystemExit(install_artifact(args.artifact_id, args.path, yes=args.yes))
 
 def cmd_models(_args: argparse.Namespace) -> None:
     from app.models import REGISTRY, INCOMPATIBLE
@@ -546,15 +627,24 @@ def main() -> None:
                    help="Login method (default: prompt)")
 
     # sync
-    p = sub.add_parser("sync", help="Run the sync pipeline (metadata→download→preview→embed)")
+    p = sub.add_parser("sync", help="Run the sync pipeline (metadata→download→preview→ocr→embed)")
     p.add_argument("--metadata", action="store_true", help="Metadata stage only")
     p.add_argument("--download", action="store_true", help="Download stage only")
     p.add_argument("--preview", action="store_true", help="Preview stage only")
+    p.add_argument("--ocr", action="store_true", help="OCR stage only")
     p.add_argument("--embed", action="store_true", help="Embed stage only")
+    p.add_argument("--ocr-text-embed", action="store_true", dest="ocr_text_embed",
+                   help="Backfill semantic OCR-text embeddings from persisted ocr_text")
     p.add_argument("--reindex", action="store_true",
                    help="Re-extract previews and re-embed everything (after changing FRAME_COUNT)")
+    p.add_argument("--reocr", action="store_true",
+                   help="Full preview→OCR→embed rebuild for the existing local library using current OCR settings")
     p.add_argument("--keep-previews", action="store_true", dest="keep_previews",
                    help="Do not auto-delete preview frames after embedding")
+    p.add_argument("--reocr-batch-size", type=int, default=25, metavar="N",
+                   help="When using --reocr, process the library in safe batches of N items (default: 25)")
+    p.add_argument("--reocr-preview-workers", type=int, default=1, metavar="N",
+                   help="When using --reocr, temporarily cap preview concurrency to N workers (default: 1)")
     p.add_argument("--frames", type=int, default=None, metavar="N",
                    help="Override FRAME_COUNT for this run")
     p.add_argument("--limit", type=int, default=None, metavar="N",
@@ -571,6 +661,17 @@ def main() -> None:
 
     # fts-rebuild
     sub.add_parser("fts-rebuild", help="Rebuild FTS5 full-text index (run once after upgrading)")
+
+    # explicit model artifacts (never implicit in setup/sync/run)
+    p = sub.add_parser("model", help="Inspect or explicitly install model artifacts")
+    model_sub = p.add_subparsers(dest="model_action")
+    model_sub.add_parser("status", help="Show local readiness without downloading")
+    q = model_sub.add_parser("describe", help="Show size, source, license, and destination")
+    q.add_argument("artifact_id")
+    q = model_sub.add_parser("install", help="Explicitly download one artifact")
+    q.add_argument("--id", dest="artifact_id", required=True)
+    q.add_argument("--path", required=True, help="Destination directory")
+    q.add_argument("--yes", action="store_true", help="Confirm the visible download")
 
     # models
     sub.add_parser("models", help="List available embedding models and upgrade instructions")
@@ -625,6 +726,7 @@ def main() -> None:
         "stats": cmd_stats,
         "prune": cmd_prune,
         "fts-rebuild": cmd_fts_rebuild,
+        "model": cmd_model,
         "models": cmd_models,
         "ocr-models": cmd_ocr_models,
         "ocr-benchmark": cmd_ocr_benchmark,

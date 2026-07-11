@@ -17,7 +17,7 @@ def test_ocr_profile_lines_have_single_recommended_entry_on_gpu_hosts():
     recommended = [line for line in lines if "recommended" in line]
 
     assert len(recommended) == 1
-    assert "EasyOCR scene-text" in recommended[0]
+    assert "Disable OCR" in recommended[0]
 
 
 def test_ocr_profile_lines_have_single_recommended_entry_on_cpu_hosts():
@@ -36,4 +36,4 @@ def test_ocr_profile_lines_have_single_recommended_entry_on_cpu_hosts():
     recommended = [line for line in lines if "recommended" in line]
 
     assert len(recommended) == 1
-    assert "RapidOCR" in recommended[0]
+    assert "Disable OCR" in recommended[0]

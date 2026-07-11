@@ -21,6 +21,14 @@ class EmbedError(StickerRadarError):
     """Failed to compute an embedding."""
 
 
+class ModelNotInstalled(StickerRadarError):
+    """A selected model artifact is not available locally."""
+
+
+class ModelIntegrityError(StickerRadarError):
+    """A local model artifact is incomplete or failed verification."""
+
+
 class SearchError(StickerRadarError):
     """Search index error."""
 

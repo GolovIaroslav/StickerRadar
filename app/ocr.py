@@ -2,7 +2,7 @@
 app/ocr.py — OCR runner for preview frames.
 
 Backends (set OCR_BACKEND in .env):
-  easyocr   — EasyOCR (default). 80+ languages, scene text, pip install easyocr.
+  easyocr   — EasyOCR. 80+ languages, scene text, pip install easyocr.
               Configure languages via OCR_LANGS (e.g. "ru,en,ko,ja,ch_sim").
               "ru,en" already covers Cyrillic + 50+ Latin-script languages.
   rapidocr  — RapidOCR (PaddleOCR models via ONNX, no GPU required, faster).
@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 # ── Normalize ────────────────────────────────────────────────────────────────
@@ -25,6 +26,17 @@ _YO = str.maketrans("ёЁ", "еЕ")
 _PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
 _SPACES = re.compile(r"\s+")
 _REPEATS = re.compile(r"(.)\1{2,}")  # aaaa → aa
+OCR_PIPELINE_VERSION = "frame-ocr-v2"
+
+
+@dataclass(frozen=True)
+class OCRFrameResult:
+    """OCR payload together with the backend that produced the final text."""
+
+    raw_text: str
+    norm_text: str
+    confidence: float
+    backend: str
 
 
 def normalize_text(text: str) -> str:
@@ -54,6 +66,8 @@ def backend_install_hint() -> str:
 
 def is_backend_available(backend: str) -> bool:
     backend = backend.lower()
+    if backend in {"", "off", "none"}:
+        return False
     if backend == "easyocr":
         try:
             import easyocr  # noqa: F401
@@ -73,11 +87,30 @@ def is_backend_available(backend: str) -> bool:
     return False
 
 
-def is_available() -> bool:
-    """Return True if the configured OCR backend is installed."""
+def effective_backend_name() -> str | None:
     from app import config
 
-    return is_backend_available(config.OCR_BACKEND)
+    primary = config.OCR_BACKEND.lower()
+    if is_backend_available(primary):
+        return primary
+    if config.OCR_FALLBACK_ENABLED:
+        fallback = config.OCR_FALLBACK_BACKEND.lower()
+        if fallback != primary and is_backend_available(fallback):
+            return fallback
+    return None
+
+
+def is_available() -> bool:
+    """Return True if any effective OCR backend is installed."""
+    return effective_backend_name() is not None
+
+
+def current_provenance(backend: str | None = None) -> tuple[str, str | None, str]:
+    from app import config
+
+    chosen = (backend or effective_backend_name() or config.OCR_BACKEND).lower()
+    model_ref = config.OCR_LLM_REPO if chosen == "glm-ocr" else None
+    return chosen, model_ref, OCR_PIPELINE_VERSION
 
 
 # ── EasyOCR backend ───────────────────────────────────────────────────────────
@@ -209,6 +242,10 @@ def _ocr_glm(paths: list[Path]) -> list[tuple[str, str, float]]:
     prompt = "OCR"
     out: list[tuple[str, str, float]] = []
     repo = config.OCR_LLM_REPO
+    from app.model_artifacts import resolve_local_path
+    model_path = config.OCR_MODEL_PATH or str(resolve_local_path(repo) or "")
+    if not model_path:
+        return [("", "", 0.0) for _ in paths]
     for path in paths:
         cleanup_path: Path | None = None
         try:
@@ -216,8 +253,8 @@ def _ocr_glm(paths: list[Path]) -> list[tuple[str, str, float]]:
             proc = subprocess.run(
                 [
                     "llama-cli",
-                    "--hf-repo",
-                    repo,
+                    "--model",
+                    model_path,
                     "--image",
                     str(prepared_path),
                     "--prompt",
@@ -270,12 +307,68 @@ def should_use_llm_fallback(
     return confidence < min_confidence
 
 
+def _select_glm_prefilter_backend() -> str | None:
+    from app import config
+
+    preferred = (config.OCR_GLM_PREFILTER_BACKEND or "auto").strip().lower()
+    candidates = [preferred] if preferred not in {"", "auto"} else ["rapidocr", "easyocr"]
+    for candidate in candidates:
+        if candidate == "glm-ocr":
+            continue
+        if is_backend_available(candidate):
+            return candidate
+    return None
+
+
+def _ocr_glm_with_prefilter_results(
+    paths: list[Path],
+) -> tuple[list[tuple[str, str, float]], list[str]]:
+    """Run a fast detector first and preserve the final source of every frame."""
+    from app import config
+
+    detector_backend = _select_glm_prefilter_backend()
+    if detector_backend is None:
+        results = _ocr_glm(paths)
+        return results, ["glm-ocr"] * len(results)
+
+    detector_results = _ocr_backend(detector_backend, paths)
+    sources = [detector_backend] * len(detector_results)
+    retry_indexes = [
+        idx
+        for idx, (raw, norm, conf) in enumerate(detector_results)
+        if raw.strip()
+        and norm.strip()
+        and should_use_llm_fallback(
+            raw,
+            norm,
+            conf,
+            min_confidence=config.OCR_FALLBACK_CONFIDENCE,
+            min_chars=config.OCR_FALLBACK_MIN_CHARS,
+        )
+    ]
+    if not retry_indexes:
+        return detector_results, sources
+
+    glm_results = _ocr_glm([paths[idx] for idx in retry_indexes])
+    merged = list(detector_results)
+    for idx, replacement in zip(retry_indexes, glm_results):
+        raw, norm, _ = replacement
+        if raw.strip() and norm.strip():
+            merged[idx] = replacement
+            sources[idx] = "glm-ocr"
+    return merged, sources
+
+
+def _ocr_glm_with_prefilter(paths: list[Path]) -> list[tuple[str, str, float]]:
+    return _ocr_glm_with_prefilter_results(paths)[0]
+
+
 def _ocr_backend(backend: str, paths: list[Path]) -> list[tuple[str, str, float]]:
     backend = backend.lower()
     if backend == "rapidocr":
         return _ocr_rapidocr(paths)
     if backend == "glm-ocr":
-        return _ocr_glm(paths)
+        return _ocr_glm_with_prefilter(paths)
     return _ocr_easyocr(paths)
 
 
@@ -309,7 +402,11 @@ def _apply_optional_fallback(
         return primary_results
 
     fallback_paths = [paths[idx] for idx in retry_indexes]
-    fallback_results = _ocr_backend(fallback_backend, fallback_paths)
+    fallback_results = (
+        _ocr_glm(fallback_paths)
+        if fallback_backend == "glm-ocr"
+        else _ocr_backend(fallback_backend, fallback_paths)
+    )
     merged = list(primary_results)
     for idx, replacement in zip(retry_indexes, fallback_results):
         raw, norm, _ = replacement
@@ -327,8 +424,52 @@ def ocr_frames(paths: list[Path]) -> list[tuple[str, str, float]]:
     Returns (raw_text, norm_text, confidence) per path.
     Returns ("", "", 0.0) when no text is detected or on error.
     """
+    return [
+        (result.raw_text, result.norm_text, result.confidence)
+        for result in ocr_frames_with_provenance(paths)
+    ]
+
+
+def ocr_frames_with_provenance(paths: list[Path]) -> list[OCRFrameResult]:
+    """Run OCR and report the backend that produced every final frame result."""
     from app import config
 
-    backend = config.OCR_BACKEND.lower()
-    primary_results = _ocr_backend(backend, paths)
-    return _apply_optional_fallback(backend, paths, primary_results)
+    backend = effective_backend_name() or config.OCR_BACKEND.lower()
+    if backend == "glm-ocr":
+        results, sources = _ocr_glm_with_prefilter_results(paths)
+    else:
+        results = _ocr_backend(backend, paths)
+        sources = [backend] * len(results)
+
+    if (
+        config.OCR_FALLBACK_ENABLED
+        and (fallback_backend := config.OCR_FALLBACK_BACKEND.lower()) != backend
+        and is_backend_available(fallback_backend)
+    ):
+        retry_indexes = [
+            idx
+            for idx, (raw, norm, confidence) in enumerate(results)
+            if should_use_llm_fallback(
+                raw,
+                norm,
+                confidence,
+                min_confidence=config.OCR_FALLBACK_CONFIDENCE,
+                min_chars=config.OCR_FALLBACK_MIN_CHARS,
+            )
+        ]
+        fallback_paths = [paths[idx] for idx in retry_indexes]
+        fallback_results = (
+            _ocr_glm(fallback_paths)
+            if fallback_backend == "glm-ocr"
+            else _ocr_backend(fallback_backend, fallback_paths)
+        )
+        for idx, replacement in zip(retry_indexes, fallback_results):
+            raw, norm, _ = replacement
+            if raw.strip() and norm.strip():
+                results[idx] = replacement
+                sources[idx] = fallback_backend
+
+    return [
+        OCRFrameResult(raw, norm, confidence, source)
+        for (raw, norm, confidence), source in zip(results, sources, strict=True)
+    ]

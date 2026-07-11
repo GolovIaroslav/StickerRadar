@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
+from html import escape
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.types import (
-    BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
-    Message, TelegramObject,
+    Animation, BotCommand, CallbackQuery, Document, InlineKeyboardButton,
+    InlineKeyboardMarkup, Message, Sticker, TelegramObject,
 )
 
 from app import config, db
@@ -102,6 +105,7 @@ async def cmd_status(message: Message) -> None:
     if not _owner_only(message):
         return
     counts = db.get_status_counts()
+    active_embeddings = db.count_embeddings_for_model(config.MODEL_NAME)
     ocr_line = f"  OCR text:     {counts['ocr']}\n" if config.OCR_ENABLED else ""
     await message.answer(
         f"Index status:\n"
@@ -109,8 +113,48 @@ async def cmd_status(message: Message) -> None:
         f"  Downloaded:   {counts['downloaded']}\n"
         f"  Previewed:    {counts['previewed']}\n"
         f"  Embedded:     {counts['embedded']}\n"
+        f"  Active model: {active_embeddings} frames for {config.MODEL_NAME}\n"
         f"{ocr_line}"
         f"  Failed:       {counts['failed']}"
+    )
+
+
+@router.message(Command("models"))
+async def cmd_models(message: Message) -> None:
+    if not _owner_only(message):
+        return
+    from app.model_artifacts import ARTIFACTS, artifact_ready
+    lines = ["<b>Model artifacts (local-only runtime)</b>"]
+    for artifact in ARTIFACTS:
+        marker = "✅" if artifact_ready(artifact) else "⬜"
+        lines.append(f"{marker} <code>{artifact.key}</code> — {artifact.size} — {artifact.license}")
+    lines.append("\nNothing is downloaded automatically. Install explicitly with the CLI.")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("pipeline"))
+async def cmd_pipeline(message: Message) -> None:
+    if not _owner_only(message):
+        return
+    args = (message.text or "").split()[1:]
+    for item in args:
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key, value = key.lower(), value.lower()
+        if key == "ocr" and value in {"off", "none"}:
+            config.OCR_ENABLED, config.OCR_BACKEND = False, "off"
+        elif key == "vlm" and value in {"off", "none"}:
+            config.VLM_ENABLED, config.VLM_BACKEND = False, "none"
+        elif key == "vlm" and value in {"internvl", "qwen"}:
+            config.VLM_ENABLED, config.VLM_BACKEND = True, value
+    await message.answer(
+        "<b>Pipeline</b>\n"
+        f"OCR: <code>{config.OCR_BACKEND}</code> ({'on' if config.OCR_ENABLED else 'off'})\n"
+        f"VLM: <code>{config.VLM_BACKEND}</code> ({'on' if config.VLM_ENABLED else 'off'})\n"
+        "\nExamples: <code>/pipeline ocr=off vlm=off</code>, <code>/pipeline vlm=qwen</code>\n"
+        "Runtime changes are temporary; install artifacts explicitly via CLI.",
+        parse_mode="HTML",
     )
 
 
@@ -188,6 +232,85 @@ async def cmd_sync(message: Message, bot: Bot, tg_client) -> None:
             await update(f"Sync failed: {e}")
 
 
+def _is_gif_document(document: Document | None) -> bool:
+    if document is None:
+        return False
+    return document.mime_type == "image/gif" or (document.file_name or "").lower().endswith(".gif")
+
+
+def _select_visual_target(message: Message) -> Sticker | Animation | Document | None:
+    """Prefer attached media; a text reply may target sticker, animation, or GIF document."""
+    targets = (message, getattr(message, "reply_to_message", None))
+    for target in targets:
+        if target is None:
+            continue
+        sticker = getattr(target, "sticker", None)
+        if sticker:
+            return sticker
+        animation = getattr(target, "animation", None)
+        if animation:
+            return animation
+        document = getattr(target, "document", None)
+        if _is_gif_document(document):
+            return document
+    return None
+
+
+def _inbound_suffix(media: Sticker | Animation | Document) -> str:
+    """Choose a real extension so the temporary frame renderer identifies Telegram media."""
+    if hasattr(media, "is_animated"):
+        if media.is_animated:
+            return ".tgs"
+        if media.is_video:
+            return ".webm"
+        return ".webp"
+    filename = media.file_name
+    if filename:
+        suffix = Path(filename).suffix.lower()
+        if suffix:
+            return suffix
+    return ".gif"
+
+
+@router.message(F.sticker | F.animation | F.document | F.reply_to_message.sticker | F.reply_to_message.animation | F.reply_to_message.document)
+async def handle_reply_media(message: Message, bot: Bot) -> None:
+    """Return up to ten diverse local-library reactions to incoming or replied-to media."""
+    if not _owner_only(message):
+        return
+    media = _select_visual_target(message)
+    if media is None:
+        return
+    if db.count_embeddings_for_model(config.MODEL_NAME) == 0:
+        await message.answer("Index for the active model is empty. Run /sync first.")
+        return
+
+    status = await message.answer("Сканирую смысл, кадры и текст…")
+    try:
+        with tempfile.TemporaryDirectory(prefix="stickerradar-reply-") as temp:
+            incoming = Path(temp) / f"incoming{_inbound_suffix(media)}"
+            await bot.download(media, destination=incoming)
+            from app.inbound_media import analyze_incoming_media
+            results, ocr_text = await asyncio.get_running_loop().run_in_executor(
+                None, analyze_incoming_media, incoming, Path(temp), 10
+            )
+        if not results:
+            await status.edit_text("Не нашёл достаточно сильных ответочек в индексированной коллекции.")
+            return
+        from app.sender import send_results
+        sent = await send_results(bot, message.chat.id, results)
+        if sent == 0:
+            await status.edit_text("Ответочки нашлись, но Telegram не смог их отправить.")
+            return
+        text_note = f" Текст: <code>{escape(ocr_text[:160])}</code>" if ocr_text else ""
+        await status.edit_text(
+            f"Готово: {sent} разных ответочек. Я искал реакцию, а не дубликаты сюжета.{text_note}",
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        log.exception("Reply-media analysis error")
+        await status.edit_text(f"Не удалось разобрать медиа: {exc}")
+
+
 @router.message()
 async def handle_query(message: Message, bot: Bot) -> None:
     if not _owner_only(message):
@@ -200,8 +323,12 @@ async def handle_query(message: Message, bot: Bot) -> None:
         return
 
     counts = db.get_status_counts()
-    if counts["embedded"] == 0:
-        await message.answer("Index is empty. Run /sync first.")
+    active_embeddings = db.count_embeddings_for_model(config.MODEL_NAME)
+    if counts["embedded"] == 0 or active_embeddings == 0:
+        await message.answer(
+            "Index for the active model is empty. Run /sync first.\n"
+            f"Active model: {config.MODEL_NAME}"
+        )
         return
 
     from app import search as search_mod
@@ -262,6 +389,8 @@ async def register_commands(bot: Bot) -> None:
     await bot.set_my_commands([
         BotCommand(command="sync",   description="Scan and index your stickers / GIFs"),
         BotCommand(command="status", description="Show index statistics"),
+        BotCommand(command="models", description="Show local model artifacts"),
+        BotCommand(command="pipeline", description="Configure OCR/VLM for this run"),
         BotCommand(command="help",   description="Usage examples and tips"),
     ])
 

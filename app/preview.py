@@ -67,9 +67,19 @@ def _composite(img: Image.Image) -> Image.Image:
 def _img_size(path: Path) -> tuple[int, int] | tuple[None, None]:
     try:
         with Image.open(path) as im:
+            im.load()
             return im.size
     except Exception:
         return None, None
+
+
+def _valid_image(path: Path) -> bool:
+    try:
+        with Image.open(path) as im:
+            im.load()
+        return True
+    except Exception:
+        return False
 
 
 def _probe_duration(src: Path) -> float | None:
@@ -138,7 +148,7 @@ def _extract_video(row: sqlite3.Row, ffmpeg: str) -> list[tuple[float, Path]]:
                 print(f"    ffmpeg [{src.name}] frame {i}: {stderr[:200]}")
         except subprocess.TimeoutExpired:
             print(f"    ffmpeg [{src.name}] frame {i}: timed out")
-        if out.exists() and out.stat().st_size > 0:
+        if out.exists() and out.stat().st_size > 0 and _valid_image(out):
             results.append((pos, out))
         elif i == 0:
             # fallback: first frame, no seek
@@ -147,10 +157,14 @@ def _extract_video(row: sqlite3.Row, ffmpeg: str) -> list[tuple[float, Path]]:
                     [ffmpeg, "-y", "-i", str(src), "-frames:v", "1", str(out)],
                     capture_output=True, timeout=30, check=True,
                 )
-                if out.exists() and out.stat().st_size > 0:
+                if out.exists() and out.stat().st_size > 0 and _valid_image(out):
                     results.append((pos, out))
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                pass
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or b"").decode(errors="replace").strip()
+                if stderr:
+                    print(f"    ffmpeg [{src.name}] fallback: {stderr[:200]}")
+            except subprocess.TimeoutExpired:
+                print(f"    ffmpeg [{src.name}] fallback: timed out")
     return results
 
 
@@ -178,7 +192,8 @@ def _extract_tgs_rlottie(row: sqlite3.Row) -> list[tuple[float, Path]] | None:
             _composite(img).save(out)
             results.append((pos, out))
         return results
-    except Exception:
+    except Exception as exc:
+        print(f"    rlottie [{Path(row['local_path']).name}]: {exc}")
         return None
 
 
@@ -195,7 +210,13 @@ def _extract_tgs_lottie_cli(row: sqlite3.Row) -> list[tuple[float, Path]] | None
             capture_output=True, timeout=30, check=True,
         )
         return [(0.5, out)]
-    except Exception:
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode(errors="replace").strip()
+        if stderr:
+            print(f"    lottie_convert [{src.name}]: {stderr[:200]}")
+        return None
+    except Exception as exc:
+        print(f"    lottie_convert [{src.name}]: {exc}")
         return None
 
 

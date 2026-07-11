@@ -83,10 +83,10 @@ class _HFBackend:
         dt = "fp16" if device == "cuda" else "fp32"
         print(f"Loading model: {model_id}  (transformers, device={self.device}, {dt})")
         self.model = AutoModel.from_pretrained(
-            model_id, trust_remote_code=trust_remote_code, **dtype_kw
+            model_id, trust_remote_code=trust_remote_code, local_files_only=True, **dtype_kw
         ).to(self.device).eval()
         self.processor = AutoProcessor.from_pretrained(
-            model_id, trust_remote_code=trust_remote_code
+            model_id, trust_remote_code=trust_remote_code, local_files_only=True
         )
         self.text_padding = text_padding
 
@@ -249,9 +249,22 @@ class Embedder:
             pass
 
     def _build(self, device: str):
+        import os
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        from app.errors import ModelNotInstalled
+        from app.model_artifacts import resolve_local_path
         from app.models import get as registry_get
         entry = registry_get(config.MODEL_NAME)
 
+        # Runtime is intentionally local-only. A configured HF id is not a
+        # permission to download it; the explicit model installer must prepare it.
+        configured = config.EMBEDDING_MODEL_PATH or (config.MODEL_NAME if Path(config.MODEL_NAME).exists() else None)
+        local = resolve_local_path(entry.key if entry else config.MODEL_NAME, configured)
+        if local is None:
+            raise ModelNotInstalled(
+                f"Embedding model '{config.MODEL_NAME}' is not installed locally. "
+                "Run `python -m app model status` and explicitly install it."
+            )
         if entry is None:
             # Custom model not in registry — a Hugging Face id OR a local path.
             # Loaded via sentence-transformers; must be CLIP-style (image + text).
@@ -267,7 +280,7 @@ class Embedder:
                     "WARNING: ALLOW_REMOTE_CODE=1 — model code from HuggingFace will be executed.\n"
                     "  Ensure you trust the model repository before proceeding."
                 )
-            return _STBackend(config.MODEL_NAME, image_model, config.ALLOW_REMOTE_CODE, device)
+            return _STBackend(str(local), image_model, config.ALLOW_REMOTE_CODE, device)
         if entry.trust_remote_code:
             print(
                 f"WARNING: {entry.key} uses trust_remote_code — Python code from "
@@ -275,13 +288,13 @@ class Embedder:
                 "  Ensure you trust this model repository before proceeding."
             )
         if entry.loader == "hf":
-            return _HFBackend(entry.key, entry.text_padding, entry.trust_remote_code, device)
+            return _HFBackend(str(local), entry.text_padding, entry.trust_remote_code, device)
         if entry.loader == "open_clip":
-            model_name = entry.key.split("/")[-1]
-            pretrained_tag = entry.open_clip_pretrained or entry.key
-            return _OpenClipBackend(model_name, pretrained_tag, device)
-        image_model = config.IMAGE_MODEL_NAME or entry.key
-        return _STBackend(entry.key, image_model, entry.trust_remote_code, device)
+            raise ModelNotInstalled(
+                f"Model '{entry.key}' uses open_clip weights; install a local checkpoint first."
+            )
+        image_model = config.IMAGE_MODEL_NAME or str(local)
+        return _STBackend(str(local), image_model, entry.trust_remote_code, device)
 
     def _get(self):
         with self._lock:
@@ -346,6 +359,11 @@ class Embedder:
     def embed_text(self, text: str) -> np.ndarray:
         return self._get().encode_text([text])[0]
 
+    def embed_texts(self, texts: list[str]) -> list[np.ndarray]:
+        if not texts:
+            return []
+        backend = self._get()
+        return list(backend.encode_text(texts))
 
 # A single shared instance so the model is loaded only ONCE per process
 # (the bot does both /sync embedding and search — without this it would load

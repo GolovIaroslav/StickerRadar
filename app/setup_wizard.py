@@ -59,13 +59,13 @@ OCR_PROFILES: list[OcrProfile] = [
     ),
     OcrProfile(
         key="glm-ocr",
-        label="GLM-OCR via llama.cpp (experimental)",
+        label="GLM-OCR via llama.cpp (hybrid rescue)",
         backend="glm-ocr",
         install_hint="Install llama.cpp and keep `llama-cli` in PATH",
         approx_size="~1.43 GB (Q8_0 + mmproj)",
-        speed="Very slow (~3973 ms/image in local tests)",
-        best_for="Hard stickers where classic OCR fails and the user accepts much slower indexing",
-        notes="Worked after converting StickerRadar WEBP stickers to PNG first. Useful for rescue passes, but too slow and too verbose for default bulk OCR.",
+        speed="Slow if forced on every image; practical only with fast prefiltering",
+        best_for="Hard stickers where classic OCR fails, but only after a cheap detector says text is present and confidence is weak",
+        notes="StickerRadar now prefilters with RapidOCR/EasyOCR first, then escalates only low-confidence text-like frames into GLM. This keeps indexing much lighter on RAM/VRAM than brute-forcing every image.",
         use_gpu=True,
     ),
     OcrProfile(
@@ -138,9 +138,7 @@ def choose_default_embedding_model(runtime: RuntimeProfile) -> ModelEntry:
 
 
 def choose_default_ocr_profile(runtime: RuntimeProfile) -> OcrProfile:
-    if runtime.has_gpu:
-        return next(p for p in OCR_PROFILES if p.key == "easyocr")
-    return next(p for p in OCR_PROFILES if p.key == "rapidocr")
+    return next(p for p in OCR_PROFILES if p.key == "off")
 
 
 def ocr_use_gpu(profile: OcrProfile, runtime: RuntimeProfile) -> bool:
@@ -203,7 +201,7 @@ def ensure_env_file() -> Path:
     env_path = config.ENV_FILE.resolve()
     if env_path.exists():
         return env_path
-    example = Path(".env.example").resolve()
+    example = env_path.parent / ".env.example"
     if example.exists():
         env_path.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
     else:
@@ -300,6 +298,7 @@ def _collect_credentials() -> dict[str, str]:
 
 
 def run_setup_wizard(*, quick: bool = False) -> dict[str, str]:
+    config.reload()
     runtime = detect_runtime_profile()
     env_path = ensure_env_file()
     text = env_path.read_text(encoding="utf-8")
@@ -324,6 +323,9 @@ def run_setup_wizard(*, quick: bool = False) -> dict[str, str]:
 
     updates = {
         "MODEL_NAME": embedding.key,
+        "MODEL_AUTO_DOWNLOAD": "false",
+        "VLM_ENABLED": "false",
+        "VLM_BACKEND": "none",
         "DEVICE": device,
         "OCR_ENABLED": "true" if ocr.enabled else "false",
         "OCR_BACKEND": ocr.backend,
@@ -333,6 +335,7 @@ def run_setup_wizard(*, quick: bool = False) -> dict[str, str]:
         "OCR_FALLBACK_BACKEND": "glm-ocr",
         "OCR_FALLBACK_CONFIDENCE": "0.45",
         "OCR_FALLBACK_MIN_CHARS": "3",
+        "OCR_GLM_PREFILTER_BACKEND": "auto",
         "SETUP_WIZARD_COMPLETED": "true",
     }
     updates.update(credentials)

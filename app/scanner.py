@@ -165,6 +165,13 @@ def _run_ocr(limit: int | None) -> None:
         )
         return
 
+    effective_backend = ocr_mod.effective_backend_name()
+    if effective_backend and effective_backend != config.OCR_BACKEND.lower():
+        print(
+            f"OCR primary backend '{config.OCR_BACKEND}' is unavailable; using '{effective_backend}' instead."
+        )
+    backend_name, model_ref, pipeline_version = ocr_mod.current_provenance(effective_backend)
+
     rows = db.list_pending_ocr(limit if limit is not None else 10 ** 9)
     total = len(rows)
     if not total:
@@ -178,27 +185,47 @@ def _run_ocr(limit: int | None) -> None:
         media_id = row["id"]
         frames = db.list_frames_for_media(media_id)
         if not frames:
-            db.mark_ocr_ok(media_id, "")
+            db.mark_ocr_failed(media_id, "no preview frames available for OCR")
             skipped += 1
             continue
 
-        paths = [Path(f["preview_path"]) for f in frames]
-        existing = [p for p in paths if p.exists()]
-        if not existing:
-            # Previews already deleted (item was embedded before OCR was enabled).
-            db.mark_ocr_ok(media_id, "")
+        frame_inputs = [(frame, Path(frame["preview_path"])) for frame in frames]
+        existing_pairs = [(frame, path) for frame, path in frame_inputs if path.exists()]
+        if not existing_pairs:
+            db.mark_ocr_failed(media_id, "preview frames missing (re-run preview stage)")
+            skipped += 1
+            continue
+        if len(existing_pairs) != len(frame_inputs):
+            db.mark_ocr_failed(media_id, "preview frames missing (partial frame set)")
             skipped += 1
             continue
 
         try:
-            results = ocr_mod.ocr_frames(existing)
+            results = ocr_mod.ocr_frames_with_provenance([path for _, path in existing_pairs])
             norm_parts: list[str] = []
-            for frame, (raw, norm, conf) in zip(frames, results):
-                if raw:
-                    db.upsert_frame_ocr(frame["id"], raw, norm, conf)
+            for (frame, _path), result in zip(existing_pairs, results, strict=True):
+                raw, norm, conf = result.raw_text, result.norm_text, result.confidence
+                frame_backend, frame_model_ref, frame_pipeline_version = ocr_mod.current_provenance(result.backend)
+                db.upsert_frame_ocr(
+                    frame["id"],
+                    raw,
+                    norm,
+                    conf,
+                    backend=frame_backend,
+                    model_ref=frame_model_ref,
+                    pipeline_version=frame_pipeline_version,
+                )
                 if norm.strip():
                     norm_parts.append(norm)
-            db.mark_ocr_ok(media_id, " ".join(norm_parts) if norm_parts else "")
+            # Keep the configured hybrid pipeline identity on the media row. The
+            # frame rows above carry the actual final source used for statistics.
+            db.mark_ocr_ok(
+                media_id,
+                " ".join(norm_parts) if norm_parts else "",
+                backend=backend_name,
+                model_ref=model_ref,
+                pipeline_version=pipeline_version,
+            )
             done += 1
         except Exception as exc:
             db.mark_ocr_failed(media_id, str(exc)[:200])
@@ -210,6 +237,42 @@ def _run_ocr(limit: int | None) -> None:
 
     _print_counts()
 
+
+
+def _run_ocr_text_embed(limit: int | None) -> None:
+    config.ensure_dirs()
+    db.get_conn()
+
+    from app.embeddings import get_shared_embedder
+
+    embedder = get_shared_embedder()
+    rows = db.list_media_missing_text_embeddings(embedder.model_name, limit if limit is not None else 10 ** 9)
+    total = len(rows)
+    if not total:
+        print("No pending OCR-text embeddings.")
+        return
+
+    print(f"Embedding OCR text for {total} items …")
+    done = 0
+    failed = 0
+    for i, row in enumerate(rows, start=1):
+        media_id = row["id"]
+        print(f"OCR-text embed {i}/{total}: {row['tg_document_id']}")
+        try:
+            text = (row["ocr_text"] or "").strip()
+            text_vec = embedder.embed_text(text)
+            db.upsert_media_text_embedding(
+                media_id=media_id,
+                model_name=embedder.model_name,
+                dim=len(text_vec),
+                vector_bytes=text_vec.tobytes(),
+                source_text=text,
+            )
+            done += 1
+        except Exception as exc:
+            failed += 1
+            print(f"  OCR-text embed failed: {exc}")
+    print(f"OCR-text embedding complete: ok={done}, failed={failed}")
 
 
 def _run_embed(limit: int | None, keep_previews: bool = False) -> None:
@@ -259,6 +322,18 @@ def _run_embed(limit: int | None, keep_previews: bool = False) -> None:
                     dim=len(vec),
                     vector_bytes=vec.tobytes(),
                 )
+
+            ocr_text = (row["ocr_text"] or "").strip()
+            if row["ocr_status"] == "ok" and ocr_text:
+                text_vec = embedder.embed_text(ocr_text)
+                db.upsert_media_text_embedding(
+                    media_id=media_id,
+                    model_name=embedder.model_name,
+                    dim=len(text_vec),
+                    vector_bytes=text_vec.tobytes(),
+                    source_text=ocr_text,
+                )
+
             db.mark_embed_ok(media_id)
             if not keep_previews:
                 freed += delete_previews(media_id)
