@@ -297,7 +297,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
             if run_ocr_text_embed_stage:
                 _run_ocr_text_embed(limit)
             if run_text_embed_backfill_stage:
-                _run_text_embed_backfill(limit)
+                # OCR may update IDs that are not the first rows in an older
+                # embedding backlog. Reconcile every stale/missing text vector
+                # so newly recognized text cannot keep an obsolete embedding.
+                _run_text_embed_backfill(None if run_ocr_stage else limit)
 
         if run_all:
             _print_stats(config, db, getattr(args, "profile", None) or _read_active_profile())

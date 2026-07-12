@@ -35,7 +35,7 @@ def test_sync_ocr_updates_dedicated_text_embeddings(monkeypatch):
 
     cli.cmd_sync(SimpleNamespace(profile="main", ocr=True, limit=7))
 
-    assert calls == [("ocr", 7), ("text-backfill", 7)]
+    assert calls == [("ocr", 7), ("text-backfill", None)]
 
 
 def test_sync_reocr_updates_all_dedicated_text_embeddings(monkeypatch):
