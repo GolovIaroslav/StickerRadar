@@ -249,7 +249,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
     run_embed_stage = run_all or getattr(args, "embed", False) or getattr(args, "reocr", False)
     run_ocr_text_embed_stage = run_all or getattr(args, "ocr_text_embed", False)
     run_text_embed_backfill_stage = getattr(args, "text_embed_backfill", False) or (
-        config.TEXT_EMBED_ENABLED and (run_all or getattr(args, "embed", False))
+        config.TEXT_EMBED_ENABLED
+        and (
+            run_all
+            or getattr(args, "embed", False)
+            or getattr(args, "ocr", False)
+            or getattr(args, "reocr", False)
+        )
     )
 
     try:
@@ -277,6 +283,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 preview_workers=max(1, getattr(args, "reocr_preview_workers", 1)),
                 keep_previews=keep_previews,
             )
+            if run_text_embed_backfill_stage:
+                # Re-OCR rebuilds the whole canonical text set, regardless of
+                # the ordinary per-stage --limit value.
+                _run_text_embed_backfill(None)
         else:
             if run_preview_stage:
                 _run_preview(limit)
@@ -425,7 +435,8 @@ def cmd_model(args: argparse.Namespace) -> None:
     elif action == "describe":
         describe(args.artifact_id)
     elif action == "install":
-        raise SystemExit(install_artifact(args.artifact_id, args.path, yes=args.yes))
+        # Reaching this explicit subcommand is the user's download confirmation.
+        raise SystemExit(install_artifact(args.artifact_id, args.path, yes=True))
 
 def cmd_models(_args: argparse.Namespace) -> None:
     from app.models import REGISTRY, INCOMPATIBLE
@@ -698,7 +709,11 @@ def main() -> None:
     q = model_sub.add_parser("install", help="Explicitly download one artifact")
     q.add_argument("--id", dest="artifact_id", required=True)
     q.add_argument("--path", default=None, help="Destination directory (default: MODEL_ROOT/<artifact-id>)")
-    q.add_argument("--yes", action="store_true", help="Confirm the visible download")
+    q.add_argument(
+        "--yes",
+        action="store_true",
+        help="Accepted for compatibility; the install subcommand is already explicit",
+    )
 
     # models
     sub.add_parser("models", help="List available embedding models and upgrade instructions")
