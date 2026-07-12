@@ -9,6 +9,7 @@ import json
 import random
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,10 +39,12 @@ def _worker_python() -> str:
             "OCR_SHADOW_PYTHON is not set. Create a Python <=3.12 PaddleOCR venv and set it."
         )
     path = Path(raw).expanduser()
-    if path.is_file():
-        return str(path)
-    resolved = shutil.which(raw)
+    resolved = str(path.resolve()) if path.is_file() else shutil.which(raw)
     if resolved:
+        if Path(resolved).resolve() == Path(sys.executable).resolve():
+            raise ModelNotInstalled(
+                "OCR_SHADOW_PYTHON must point to a separate PaddleOCR virtual environment."
+            )
         return resolved
     raise ModelNotInstalled(f"OCR_SHADOW_PYTHON does not exist: {path}")
 
@@ -56,6 +59,29 @@ def _model_dir(value: str, key: str) -> Path:
     return path.resolve()
 
 
+def _validate_worker_runtime(worker_python: str) -> None:
+    """Require the configured interpreter to be a separate Python <=3.12 venv."""
+    probe = (
+        "import json, sys; "
+        "print(json.dumps({'version': list(sys.version_info[:2]), "
+        "'prefix': sys.prefix, 'base_prefix': sys.base_prefix}))"
+    )
+    try:
+        proc = subprocess.run(
+            [worker_python, "-c", probe], capture_output=True, text=True, timeout=10, check=False
+        )
+        runtime = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        raise ModelNotInstalled(f"Could not inspect OCR_SHADOW_PYTHON: {exc}") from exc
+    if not isinstance(runtime, dict):
+        raise ModelNotInstalled("Could not inspect OCR_SHADOW_PYTHON runtime.")
+    version = runtime.get("version", [])
+    if not isinstance(version, list) or len(version) != 2 or tuple(version) > (3, 12):
+        raise ModelNotInstalled("OCR_SHADOW_PYTHON must use Python 3.12 or lower for PaddleOCR.")
+    if runtime.get("prefix") == runtime.get("base_prefix"):
+        raise ModelNotInstalled("OCR_SHADOW_PYTHON must be inside a separate virtual environment.")
+
+
 def run_ppocr_worker(paths: list[Path]) -> list[ShadowOCRResult]:
     """Run the separate PaddleOCR worker and decode its JSONL protocol."""
     if not paths:
@@ -64,6 +90,7 @@ def run_ppocr_worker(paths: list[Path]) -> list[ShadowOCRResult]:
         raise ModelNotInstalled("Shadow OCR is disabled (set OCR_SHADOW_ENABLED=true).")
 
     worker_python = _worker_python()
+    _validate_worker_runtime(worker_python)
     det_dir = _model_dir(config.OCR_SHADOW_DET_DIR, "OCR_SHADOW_DET_DIR")
     rec_dir = _model_dir(config.OCR_SHADOW_REC_DIR, "OCR_SHADOW_REC_DIR")
     command = [
@@ -150,6 +177,13 @@ def _image_path(row) -> Path | None:
     return preview.resolve() if preview and preview.is_file() else None
 
 
+def _looks_plausible_text(text: str) -> bool:
+    """Conservative reporting heuristic; a human still decides promotion."""
+    normalized = normalize_text(text)
+    characters = normalized.replace(" ", "")
+    return len(characters) >= 3 and any(char.isalnum() for char in characters)
+
+
 def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42) -> dict[str, int]:
     """Run PP-OCRv5 as a measurement-only batch and print its comparison report."""
     if limit < 1:
@@ -199,10 +233,19 @@ def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42)
         if media_id in by_media and not (row["ocr_text"] or "").strip()
     ]
     recovered = sum(bool((by_media[media_id].text or "").strip()) for media_id in empty_selected)
+    plausible = sum(_looks_plausible_text(by_media[media_id].text) for media_id in empty_selected)
+    denominator = len(empty_selected) or 1
     print(
         f"PP-OCRv5 shadow: processed={len(by_media)}, skipped={skipped}; "
-        f"previously-empty with text={recovered}/{len(empty_selected)}"
+        f"previously-empty with text={recovered}/{len(empty_selected)} "
+        f"({recovered / denominator:.0%}); plausibility candidates={plausible}/{len(empty_selected)}"
     )
+    if empty_selected:
+        print("Previously-empty outputs (review plausibility before any promotion):")
+        for media_id in empty_selected:
+            result = by_media[media_id]
+            label = "candidate" if _looks_plausible_text(result.text) else "review"
+            print(f"  #{media_id} [{label}]: {result.text}" + (f"  [error: {result.error}]" if result.error else ""))
 
     corpus_reported = 0
     for media_id in corpus_ids:
@@ -226,5 +269,6 @@ def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42)
         "skipped": skipped,
         "previously_empty": len(empty_selected),
         "recovered": recovered,
+        "plausibility_candidates": plausible,
         "corpus_reported": corpus_reported,
     }

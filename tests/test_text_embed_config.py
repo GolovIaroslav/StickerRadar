@@ -82,6 +82,7 @@ def test_ppocr_shadow_artifact_installs_both_local_model_folders(monkeypatch, tm
         ["hf", "download", "PaddlePaddle/eslav_PP-OCRv5_mobile_rec", "--local-dir", str(target / "rec")],
     ]
     output = capsys.readouterr().out
+    assert "OCR_SHADOW_PYTHON=<path-to-ppocr-venv-python-executable>" in output
     assert f"OCR_SHADOW_DET_DIR={target / 'det'}" in output
     assert f"OCR_SHADOW_REC_DIR={target / 'rec'}" in output
 

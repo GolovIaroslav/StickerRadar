@@ -56,6 +56,7 @@ def test_shadow_ocr_only_writes_its_own_table(monkeypatch, tmp_path):
         "skipped": 0,
         "previously_empty": 1,
         "recovered": 1,
+        "plausibility_candidates": 1,
         "corpus_reported": 1,
     }
     canonical = conn.execute(
@@ -82,3 +83,11 @@ def test_character_error_rate_uses_normalized_plain_levenshtein():
 
     assert character_error_rate("Пятница!", "пятница") == 0.0
     assert character_error_rate("abc", "axc") == 1 / 3
+
+
+def test_shadow_plausibility_heuristic_rejects_punctuation_and_short_noise():
+    from app.shadow_ocr import _looks_plausible_text
+
+    assert _looks_plausible_text("пятница")
+    assert not _looks_plausible_text("!!!")
+    assert not _looks_plausible_text("ok")

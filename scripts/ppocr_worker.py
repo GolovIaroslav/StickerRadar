@@ -64,6 +64,11 @@ def _result_for_path(ocr: Any, path: Path) -> dict[str, Any]:
 
 
 def main() -> int:
+    if sys.version_info[:2] > (3, 12):
+        raise SystemExit("PP-OCR worker requires Python 3.12 or lower")
+    if sys.prefix == sys.base_prefix:
+        raise SystemExit("PP-OCR worker must run inside a separate virtual environment")
+
     parser = argparse.ArgumentParser(description="Local PP-OCRv5 JSONL worker")
     parser.add_argument("--det-dir", required=True)
     parser.add_argument("--rec-dir", required=True)

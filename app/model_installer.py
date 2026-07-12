@@ -52,9 +52,8 @@ def _print_text_embed_env_lines(target: Path, item) -> None:
 def _print_ppocr_env_lines(target: Path, item) -> None:
     if item.key != "ocr:ppocrv5-eslav":
         return
-    python = "python3.12"
     print("Set these values in .env after creating the separate PaddleOCR venv:")
-    print(f"OCR_SHADOW_PYTHON=/path/to/ppocr-venv/bin/{python}")
+    print("OCR_SHADOW_PYTHON=<path-to-ppocr-venv-python-executable>")
     print(f"OCR_SHADOW_DET_DIR={target / 'det'}")
     print(f"OCR_SHADOW_REC_DIR={target / 'rec'}")
 
