@@ -132,6 +132,18 @@ async def cmd_models(message: Message) -> None:
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
+@router.message(Command("unload"))
+async def cmd_unload(message: Message) -> None:
+    if not _owner_only(message):
+        return
+    from app.embeddings import get_shared_embedder
+    was_loaded = get_shared_embedder().unload()
+    await message.answer(
+        "🧹 Embedding model unloaded from RAM/VRAM." if was_loaded
+        else "Embedding model wasn't loaded — nothing to unload."
+    )
+
+
 @router.message(Command("pipeline"))
 async def cmd_pipeline(message: Message) -> None:
     if not _owner_only(message):
@@ -391,6 +403,7 @@ async def register_commands(bot: Bot) -> None:
         BotCommand(command="status", description="Show index statistics"),
         BotCommand(command="models", description="Show local model artifacts"),
         BotCommand(command="pipeline", description="Configure OCR/VLM for this run"),
+        BotCommand(command="unload", description="Unload the embedding model from RAM now"),
         BotCommand(command="help",   description="Usage examples and tips"),
     ])
 

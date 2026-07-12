@@ -207,11 +207,11 @@ class Embedder:
         self._load_error: RuntimeError | None = None
         self._last_use: float = 0.0
 
-    def unload(self) -> None:
-        """Release model weights from RAM/VRAM."""
+    def unload(self) -> bool:
+        """Release model weights from RAM/VRAM. Returns True if a model was actually loaded."""
         with self._lock:
             if self._backend is None:
-                return
+                return False
             self._backend = None
             self._last_use = 0.0
         try:
@@ -219,7 +219,12 @@ class Embedder:
             torch.cuda.empty_cache()
         except Exception:
             pass
-        print("Embedding model unloaded (idle timeout).")
+        print("Embedding model unloaded.")
+        return True
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._backend is not None
 
     def idle_seconds(self) -> float:
         """Seconds since last embed call. Returns 0 if model is not loaded or never used."""
