@@ -24,17 +24,17 @@ router = Router()
 
 _sync_lock = asyncio.Lock()
 
-# button_msg_id → (query, already_shown)
-_more_state: dict[int, tuple[str, int]] = {}
+# button_msg_id → (query, candidate_cursor, already_shown)
+_more_state: dict[int, tuple[str, int, int]] = {}
 _MORE_STATE_MAX = 200
 
 
-async def _send_more_button(bot: Bot, chat_id: int, query: str, shown: int) -> None:
+async def _send_more_button(bot: Bot, chat_id: int, query: str, cursor: int, shown: int) -> None:
     markup = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔍 More 10", callback_data="more"),
     ]])
     msg = await bot.send_message(chat_id, f"Shown: {shown}", reply_markup=markup)
-    _more_state[msg.message_id] = (query, shown)
+    _more_state[msg.message_id] = (query, cursor, shown)
     if len(_more_state) > _MORE_STATE_MAX:
         _more_state.pop(next(iter(_more_state)))
 
@@ -323,6 +323,60 @@ async def handle_reply_media(message: Message, bot: Bot) -> None:
         await status.edit_text(f"Не удалось разобрать медиа: {exc}")
 
 
+async def _send_query_page(
+    bot: Bot,
+    chat_id: int,
+    query: str,
+    cursor: int = 0,
+) -> tuple[int, int, bool]:
+    """Send one full page, expanding the candidate window around skipped items."""
+    from app import search as search_mod
+    from app.sender import select_sendable_page, send_results
+
+    page_size = config.TOP_K
+    candidate_limit = max(page_size, cursor + page_size)
+    sent_total = 0
+    next_cursor = cursor
+    results: list = []
+    while sent_total < page_size:
+        results = await asyncio.get_running_loop().run_in_executor(
+            None, search_mod.search, query, candidate_limit
+        )
+        # Text search must not hide the best match merely because it was
+        # sent in a previous query. The candidate cursor prevents repeats
+        # between pages of this query.
+        recent_ids: set[int] = set()
+        recent_packs: set[str] = set()
+        batch, next_cursor = select_sendable_page(
+            results,
+            cursor=next_cursor,
+            page_size=page_size - sent_total,
+            recent_media_ids=recent_ids,
+            recent_packs=recent_packs,
+        )
+        if batch:
+            sent_total += await send_results(
+                bot, chat_id, batch, exclude_recent=False
+            )
+        log.info(
+            "Text search page query=%r candidate_limit=%d selected=%d sent_total=%d cursor=%d",
+            query,
+            candidate_limit,
+            len(batch),
+            sent_total,
+            next_cursor,
+        )
+        if sent_total >= page_size:
+            break
+        if next_cursor >= len(results) and len(results) >= candidate_limit:
+            candidate_limit += page_size
+            continue
+        break
+
+    has_more = next_cursor < len(results) or len(results) >= candidate_limit
+    return sent_total, next_cursor, has_more
+
+
 @router.message()
 async def handle_query(message: Message, bot: Bot) -> None:
     if not _owner_only(message):
@@ -343,27 +397,18 @@ async def handle_query(message: Message, bot: Bot) -> None:
         )
         return
 
-    from app import search as search_mod
-    from app.sender import send_results
-
     try:
-        results = await asyncio.get_running_loop().run_in_executor(
-            None, search_mod.search, query
-        )
+        sent, cursor, has_more = await _send_query_page(bot, message.chat.id, query)
     except Exception as e:
         log.exception("Search error")
         await message.answer(f"Search error: {e}")
         return
 
-    if not results:
-        await message.answer("No results found.")
-        return
-
-    sent = await send_results(bot, message.chat.id, results)
     if sent == 0:
         await message.answer("Found results but failed to send them.")
         return
-    await _send_more_button(bot, message.chat.id, query, sent)
+    if has_more:
+        await _send_more_button(bot, message.chat.id, query, cursor, sent)
 
 
 @router.callback_query(F.data == "more")
@@ -373,7 +418,7 @@ async def handle_more(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Search again — the session expired.")
         return
 
-    query, shown = state
+    query, cursor, shown = state
     await callback.answer()
 
     try:
@@ -381,19 +426,22 @@ async def handle_more(callback: CallbackQuery, bot: Bot) -> None:
     except Exception:
         pass
 
-    from app import search as search_mod
-    from app.sender import send_results as _send
-
-    results = await asyncio.get_running_loop().run_in_executor(
-        None, search_mod.search, query, shown + 10
-    )
-    batch = results[shown:]
-    if not batch:
-        await bot.send_message(callback.message.chat.id, "No more results.")
+    try:
+        sent, next_cursor, has_more = await _send_query_page(
+            bot, callback.message.chat.id, query, cursor
+        )
+    except Exception as e:
+        log.exception("More search error")
+        await bot.send_message(callback.message.chat.id, f"Search error: {e}")
         return
 
-    sent = await _send(bot, callback.message.chat.id, batch)
-    await _send_more_button(bot, callback.message.chat.id, query, shown + sent)
+    if sent == 0:
+        await bot.send_message(callback.message.chat.id, "No more results.")
+        return
+    if has_more:
+        await _send_more_button(
+            bot, callback.message.chat.id, query, next_cursor, shown + sent
+        )
 
 
 async def register_commands(bot: Bot) -> None:

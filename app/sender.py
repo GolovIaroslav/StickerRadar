@@ -95,11 +95,46 @@ def _pick_send_method(result: SearchResult) -> str:
     return "sticker"
 
 
+def select_sendable_page(
+    results: list[SearchResult],
+    *,
+    cursor: int,
+    page_size: int,
+    recent_media_ids: set[int],
+    recent_packs: set[str],
+) -> tuple[list[SearchResult], int]:
+    """Select one page and return the next cursor over *candidates consumed*.
+
+    A cursor based on successfully sent items is incorrect: recent-history
+    filtering can skip candidates, so the next page would repeat earlier
+    candidates.  The cursor therefore advances for every inspected result.
+    """
+    page: list[SearchResult] = []
+    seen_ids: set[int] = set()
+    seen_packs: set[str] = set()
+    index = max(0, cursor)
+    while index < len(results) and len(page) < page_size:
+        result = results[index]
+        index += 1
+        pack = result.set_short_name or ""
+        if result.media_id in recent_media_ids or result.media_id in seen_ids:
+            continue
+        if pack and (pack in recent_packs or pack in seen_packs):
+            continue
+        page.append(result)
+        seen_ids.add(result.media_id)
+        if pack:
+            seen_packs.add(pack)
+    return page, index
+
+
 async def send_results(
     bot: Bot,
     chat_id: int,
     results: list[SearchResult],
     delay_ms: int | None = None,
+    *,
+    exclude_recent: bool = True,
 ) -> int:
     """
     Send all results with optional inter-message delay.
@@ -108,8 +143,8 @@ async def send_results(
     if delay_ms is None:
         delay_ms = config.BOT_SEND_DELAY_MS
 
-    recent_ids = db.recent_sent_media(chat_id)
-    recent_packs = db.recent_sent_packs(chat_id)
+    recent_ids = db.recent_sent_media(chat_id) if exclude_recent else set()
+    recent_packs = db.recent_sent_packs(chat_id) if exclude_recent else set()
     seen_ids: set[int] = set()
     seen_packs: set[str] = set()
     sent = 0
