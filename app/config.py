@@ -115,6 +115,16 @@ MODEL_ROOT: Path
 MODEL_AUTO_DOWNLOAD: bool
 EMBEDDING_MODEL_PATH: str
 
+# Optional dedicated text-embedding branch for OCR text and queries.
+TEXT_EMBED_ENABLED: bool
+TEXT_EMBED_BACKEND: str
+TEXT_EMBED_MODEL_PATH: str
+TEXT_EMBED_SERVER_HOST: str
+TEXT_EMBED_SERVER_PORT: int
+TEXT_EMBED_SERVER_AUTOSTART: bool
+TEXT_EMBED_LLAMA_SERVER_PATH: str
+TEXT_EMBED_QUERY_PREFIX: str
+
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
@@ -170,6 +180,9 @@ def _assign_from_env() -> None:
     global IMAGE_MODEL_NAME, DEVICE
     global DATA_DIR, SESSION_PATH, DB_PATH, MEDIA_DIR, PREVIEWS_DIR, LOGS_DIR, EVAL_DIR
     global MODEL_NAME, MODEL_ROOT, MODEL_AUTO_DOWNLOAD, EMBEDDING_MODEL_PATH
+    global TEXT_EMBED_ENABLED, TEXT_EMBED_BACKEND, TEXT_EMBED_MODEL_PATH
+    global TEXT_EMBED_SERVER_HOST, TEXT_EMBED_SERVER_PORT, TEXT_EMBED_SERVER_AUTOSTART
+    global TEXT_EMBED_LLAMA_SERVER_PATH, TEXT_EMBED_QUERY_PREFIX
     global TOP_K, FRAME_COUNT, SCAN_CONCURRENCY, BOT_SEND_DELAY_MS, MODEL_IDLE_UNLOAD_SEC
     global ENABLE_CAPTIONS, CAPTION_PROVIDER, VLM_ENABLED, VLM_BACKEND, VLM_MODEL_PATH
     global OCR_ENABLED, OCR_BACKEND, OCR_USE_GPU, OCR_LANGS, OCR_LLM_REPO, OCR_MODEL_PATH
@@ -197,6 +210,17 @@ def _assign_from_env() -> None:
     MODEL_ROOT = _path("MODEL_ROOT", DATA_DIR / "models")
     MODEL_AUTO_DOWNLOAD = _bool("MODEL_AUTO_DOWNLOAD", False)
     EMBEDDING_MODEL_PATH = _optional_str("EMBEDDING_MODEL_PATH")
+    TEXT_EMBED_ENABLED = _bool("TEXT_EMBED_ENABLED", False)
+    TEXT_EMBED_BACKEND = _str("TEXT_EMBED_BACKEND", "llamacpp")
+    TEXT_EMBED_MODEL_PATH = _optional_str("TEXT_EMBED_MODEL_PATH")
+    TEXT_EMBED_SERVER_HOST = _str("TEXT_EMBED_SERVER_HOST", "127.0.0.1")
+    TEXT_EMBED_SERVER_PORT = _int("TEXT_EMBED_SERVER_PORT", 8091)
+    TEXT_EMBED_SERVER_AUTOSTART = _bool("TEXT_EMBED_SERVER_AUTOSTART", True)
+    TEXT_EMBED_LLAMA_SERVER_PATH = _optional_str("TEXT_EMBED_LLAMA_SERVER_PATH")
+    TEXT_EMBED_QUERY_PREFIX = _str(
+        "TEXT_EMBED_QUERY_PREFIX",
+        "Instruct: Given a search query, retrieve the sticker caption that matches its meaning\\nQuery: ",
+    )
 
     TOP_K = _int("TOP_K", 10)
     FRAME_COUNT = _int("FRAME_COUNT", 5)

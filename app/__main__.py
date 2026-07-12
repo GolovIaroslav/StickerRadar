@@ -670,7 +670,7 @@ def main() -> None:
     q.add_argument("artifact_id")
     q = model_sub.add_parser("install", help="Explicitly download one artifact")
     q.add_argument("--id", dest="artifact_id", required=True)
-    q.add_argument("--path", required=True, help="Destination directory")
+    q.add_argument("--path", default=None, help="Destination directory (default: MODEL_ROOT/<artifact-id>)")
     q.add_argument("--yes", action="store_true", help="Confirm the visible download")
 
     # models

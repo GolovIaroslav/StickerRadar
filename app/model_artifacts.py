@@ -20,6 +20,7 @@ class Artifact:
     license: str
     files: tuple[str, ...] = ()
     notes: str = ""
+    revision: str | None = None
 
 
 ARTIFACTS: tuple[Artifact, ...] = (
@@ -31,6 +32,17 @@ ARTIFACTS: tuple[Artifact, ...] = (
         size="~1.5 GB",
         license="Apache-2.0",
         notes="Multilingual image+text retrieval model.",
+    ),
+    Artifact(
+        key="text-embed:qwen3-0.6b",
+        capability="text-embedding",
+        label="Qwen3-Embedding-0.6B GGUF Q8_0",
+        source="Qwen/Qwen3-Embedding-0.6B-GGUF",
+        size="~640 MB",
+        license="Apache-2.0",
+        files=("Qwen3-Embedding-0.6B-Q8_0.gguf",),
+        notes="Dedicated multilingual OCR-text/query embeddings via llama.cpp.",
+        revision="370f27d7550e0def9b39c1f16d3fbaa13aa67728",
     ),
     Artifact(
         key="ocr:rapidocr",

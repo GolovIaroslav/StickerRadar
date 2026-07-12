@@ -21,6 +21,8 @@ def _configured_path(item) -> Path | None:
         configured = Path(config.VLM_MODEL_PATH).expanduser()
         if "qwen" in str(configured).lower():
             return configured
+    if item.key == "text-embed:qwen3-0.6b" and config.TEXT_EMBED_MODEL_PATH:
+        return Path(config.TEXT_EMBED_MODEL_PATH).expanduser()
     return Path(config.MODEL_ROOT).expanduser() / item.key.replace(":", "-")
 
 
@@ -32,13 +34,24 @@ def status_lines() -> list[str]:
     return lines
 
 
-def install_artifact(key: str, destination: str | Path, *, yes: bool = False) -> int:
+def _print_text_embed_env_lines(target: Path, item) -> None:
+    if item.key != "text-embed:qwen3-0.6b":
+        return
+    model_file = target if target.is_file() else target / item.files[0]
+    llama_server = shutil.which("llama-server") or ""
+    print("Set these two path values in .env:")
+    print(f"TEXT_EMBED_MODEL_PATH={model_file}")
+    print(f"TEXT_EMBED_LLAMA_SERVER_PATH={llama_server}")
+
+
+def install_artifact(key: str, destination: str | Path | None = None, *, yes: bool = False) -> int:
     item = get_artifact(key)
     if item is None:
         raise ValueError(f"Unknown artifact: {key}")
-    target = Path(destination).expanduser().resolve()
+    target = (Path(destination).expanduser() if destination else _configured_path(item)).resolve()
     if artifact_ready(item, target):
         print(f"Already installed: {target}")
+        _print_text_embed_env_lines(target, item)
         return 0
     print(f"About to install: {item.label}")
     print(f"  Source: {item.source}\n  Size: {item.size}\n  Destination: {target}")
@@ -51,6 +64,8 @@ def install_artifact(key: str, destination: str | Path, *, yes: bool = False) ->
         base = ["download", repo]
         if item.files:
             base.extend(item.files)
+        if item.revision:
+            base.extend(["--revision", item.revision])
         base.extend(["--local-dir", str(target)])
         command = (["hf"] + base) if shutil.which("hf") else [
             sys.executable, "-c",
@@ -59,6 +74,7 @@ def install_artifact(key: str, destination: str | Path, *, yes: bool = False) ->
         ]
         print("Running explicit installer command:", " ".join(command))
         subprocess.run(command, check=True)
+        _print_text_embed_env_lines(target, item)
         return 0
     raise RuntimeError(
         f"No safe installer recipe exists for {item.source!r}. "
