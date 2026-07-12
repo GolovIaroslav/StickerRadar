@@ -128,11 +128,15 @@ def _get_easyocr_reader():
 
             langs = [l.strip() for l in config.OCR_LANGS.split(",") if l.strip()]
             gpu = config.OCR_USE_GPU
-            print(
-                f"Loading EasyOCR ({','.join(langs)}, gpu={gpu})"
-                " — first run downloads models (~300 MB) …"
+            if not config.OCR_AUTO_DOWNLOAD:
+                print("Loading EasyOCR without model downloads (OCR_AUTO_DOWNLOAD=false)")
+            print(f"Loading EasyOCR ({','.join(langs)}, gpu={gpu})")
+            _easyocr_reader = easyocr.Reader(
+                langs,
+                gpu=gpu,
+                verbose=False,
+                download_enabled=config.OCR_AUTO_DOWNLOAD,
             )
-            _easyocr_reader = easyocr.Reader(langs, gpu=gpu, verbose=False)
             print("EasyOCR ready.")
     return _easyocr_reader
 

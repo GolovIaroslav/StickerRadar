@@ -53,3 +53,26 @@ def test_ocr_frames_applies_fallback_only_to_flagged_items(monkeypatch):
         ("good text", "good text", 0.91),
         ("fixed three", "fixed three", 0.64),
     ]
+
+
+def test_easyocr_reader_does_not_download_by_default(monkeypatch):
+    import sys
+    import types
+
+    from app import config, ocr
+
+    calls = []
+
+    class FakeReader:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setitem(sys.modules, "easyocr", types.SimpleNamespace(Reader=FakeReader))
+    monkeypatch.setattr(config, "OCR_LANGS", "ru,en")
+    monkeypatch.setattr(config, "OCR_USE_GPU", False)
+    monkeypatch.setattr(config, "OCR_AUTO_DOWNLOAD", False)
+    monkeypatch.setattr(ocr, "_easyocr_reader", None)
+
+    ocr._get_easyocr_reader()
+
+    assert calls == [{"gpu": False, "verbose": False, "download_enabled": False}]
