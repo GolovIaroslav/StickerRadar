@@ -87,6 +87,21 @@ source .venv/bin/activate        # bash / zsh
 pip install -e .
 ```
 
+### Text embedding branch (optional)
+
+The dedicated Qwen3 text branch improves paraphrase and Russian/English matching
+for stickers with OCR text. Install it locally, then add these lines to `.env`:
+
+```bash
+python -m app model install --id text-embed:qwen3-0.6b
+
+TEXT_EMBED_ENABLED=true
+TEXT_EMBED_MODEL_PATH=/path/to/Qwen3-Embedding-0.6B-Q8_0.gguf
+TEXT_EMBED_LLAMA_SERVER_PATH=/path/to/llama-server
+```
+
+Run `python -m app sync --text-embed-backfill` after OCR text is already indexed.
+
 Optional: animated `.tgs` sticker support (may require native libs):
 
 ```bash

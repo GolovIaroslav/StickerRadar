@@ -136,11 +136,24 @@ async def cmd_models(message: Message) -> None:
 async def cmd_unload(message: Message) -> None:
     if not _owner_only(message):
         return
-    from app.embeddings import get_shared_embedder
-    was_loaded = get_shared_embedder().unload()
+
+    def unload_models() -> tuple[bool, bool]:
+        from app.embeddings import unload_shared_embedder
+        from app.text_embed import unload_shared_text_embedder
+
+        return unload_shared_embedder(), unload_shared_text_embedder()
+
+    image_unloaded, text_unloaded = await asyncio.get_running_loop().run_in_executor(
+        None, unload_models
+    )
+    unloaded = []
+    if image_unloaded:
+        unloaded.append("image embedding model")
+    if text_unloaded:
+        unloaded.append("text embedding server")
     await message.answer(
-        "🧹 Embedding model unloaded from RAM/VRAM." if was_loaded
-        else "Embedding model wasn't loaded — nothing to unload."
+        "🧹 Unloaded from RAM/VRAM: " + ", ".join(unloaded) + "."
+        if unloaded else "No StickerRadar model was loaded — nothing to unload."
     )
 
 
@@ -190,7 +203,14 @@ async def cmd_sync(message: Message, bot: Bot, tg_client) -> None:
     loop = asyncio.get_running_loop()
     async with _sync_lock:
         try:
-            from app.scanner import _run_metadata_sync, _run_download, _run_preview, _run_ocr, _run_embed
+            from app.scanner import (
+                _run_download,
+                _run_embed,
+                _run_metadata_sync,
+                _run_ocr,
+                _run_preview,
+                _run_text_embed_backfill,
+            )
 
             await update("Syncing metadata…")
             await _run_metadata_sync(None, client=tg_client)
@@ -228,6 +248,8 @@ async def cmd_sync(message: Message, bot: Bot, tg_client) -> None:
             )
 
             await loop.run_in_executor(None, _run_embed, None)
+            if config.TEXT_EMBED_ENABLED:
+                await loop.run_in_executor(None, _run_text_embed_backfill, None)
             c = db.get_status_counts()
             from app.search import invalidate_cache
             invalidate_cache()
@@ -451,7 +473,7 @@ async def register_commands(bot: Bot) -> None:
         BotCommand(command="status", description="Show index statistics"),
         BotCommand(command="models", description="Show local model artifacts"),
         BotCommand(command="pipeline", description="Configure OCR/VLM for this run"),
-        BotCommand(command="unload", description="Unload the embedding model from RAM now"),
+        BotCommand(command="unload", description="Unload StickerRadar models from RAM now"),
         BotCommand(command="help",   description="Usage examples and tips"),
     ])
 

@@ -23,6 +23,11 @@ def _configured_path(item) -> Path | None:
             return configured
     if item.key == "text-embed:qwen3-0.6b" and config.TEXT_EMBED_MODEL_PATH:
         return Path(config.TEXT_EMBED_MODEL_PATH).expanduser()
+    if item.key == "ocr:ppocrv5-eslav":
+        det_dir = Path(config.OCR_SHADOW_DET_DIR).expanduser() if config.OCR_SHADOW_DET_DIR else None
+        rec_dir = Path(config.OCR_SHADOW_REC_DIR).expanduser() if config.OCR_SHADOW_REC_DIR else None
+        if det_dir and rec_dir and det_dir.parent == rec_dir.parent:
+            return det_dir.parent
     return Path(config.MODEL_ROOT).expanduser() / item.key.replace(":", "-")
 
 
@@ -44,6 +49,16 @@ def _print_text_embed_env_lines(target: Path, item) -> None:
     print(f"TEXT_EMBED_LLAMA_SERVER_PATH={llama_server}")
 
 
+def _print_ppocr_env_lines(target: Path, item) -> None:
+    if item.key != "ocr:ppocrv5-eslav":
+        return
+    python = "python3.12"
+    print("Set these values in .env after creating the separate PaddleOCR venv:")
+    print(f"OCR_SHADOW_PYTHON=/path/to/ppocr-venv/bin/{python}")
+    print(f"OCR_SHADOW_DET_DIR={target / 'det'}")
+    print(f"OCR_SHADOW_REC_DIR={target / 'rec'}")
+
+
 def install_artifact(key: str, destination: str | Path | None = None, *, yes: bool = False) -> int:
     item = get_artifact(key)
     if item is None:
@@ -52,12 +67,26 @@ def install_artifact(key: str, destination: str | Path | None = None, *, yes: bo
     if artifact_ready(item, target):
         print(f"Already installed: {target}")
         _print_text_embed_env_lines(target, item)
+        _print_ppocr_env_lines(target, item)
         return 0
     print(f"About to install: {item.label}")
     print(f"  Source: {item.source}\n  Size: {item.size}\n  Destination: {target}")
     if not yes:
         print("Nothing downloaded. Re-run with --yes to confirm this explicit installation.")
         return 2
+    if item.components:
+        target.mkdir(parents=True, exist_ok=True)
+        for source, directory in item.components:
+            base = ["download", source, "--local-dir", str(target / directory)]
+            command = (["hf"] + base) if shutil.which("hf") else [
+                sys.executable, "-c",
+                "from huggingface_hub.cli.hf import main; main()",
+                "hf", *base,
+            ]
+            print("Running explicit installer command:", " ".join(command))
+            subprocess.run(command, check=True)
+        _print_ppocr_env_lines(target, item)
+        return 0
     if item.source.startswith("ggml-org/") or "GGUF" in item.source or item.capability == "embedding":
         target.mkdir(parents=True, exist_ok=True)
         repo = item.source.split(":", 1)[0]

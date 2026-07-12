@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+
+def _add_media(db, conn, tmp_path, document_id: str, ocr_text: str) -> tuple[int, object]:
+    media_id = db.upsert_media_item(
+        tg_document_id=document_id,
+        access_hash="hash",
+        file_reference=b"ref",
+        media_kind="sticker",
+        sticker_format="static",
+        mime_type="image/png",
+        file_ext=".png",
+        emoji=None,
+        set_id=None,
+        set_access_hash=None,
+        set_short_name=None,
+        set_title=None,
+    )
+    image = tmp_path / f"{document_id}.png"
+    image.write_bytes(b"not-decoded-in-test")
+    conn.execute(
+        "UPDATE media_items SET local_path=?, ocr_status='ok', ocr_text=? WHERE id=?",
+        (str(image), ocr_text, media_id),
+    )
+    conn.commit()
+    return media_id, image
+
+
+def test_shadow_ocr_only_writes_its_own_table(monkeypatch, tmp_path):
+    from app import config, db, shadow_ocr
+
+    db.close()
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "app.sqlite")
+    conn = db.get_conn()
+    corpus_media_id, corpus_image = _add_media(db, conn, tmp_path, "corpus", "canonical OCR")
+    empty_media_id, empty_image = _add_media(db, conn, tmp_path, "empty", "")
+
+    monkeypatch.setattr(
+        shadow_ocr,
+        "_load_corpus",
+        lambda: [{"id": corpus_media_id, "visual_text": "ground truth"}],
+    )
+
+    def fake_worker(paths):
+        assert set(paths) == {corpus_image.resolve(), empty_image.resolve()}
+        return [
+            shadow_ocr.ShadowOCRResult(path, f"shadow {path.stem}", [[[0, 0]]], [0.9])
+            for path in paths
+        ]
+
+    monkeypatch.setattr(shadow_ocr, "run_ppocr_worker", fake_worker)
+    report = shadow_ocr.run_shadow_ocr(limit=2)
+
+    assert report == {
+        "processed": 2,
+        "skipped": 0,
+        "previously_empty": 1,
+        "recovered": 1,
+        "corpus_reported": 1,
+    }
+    canonical = conn.execute(
+        "SELECT id, ocr_text FROM media_items ORDER BY id"
+    ).fetchall()
+    assert [(row["id"], row["ocr_text"]) for row in canonical] == [
+        (corpus_media_id, "canonical OCR"),
+        (empty_media_id, ""),
+    ]
+    shadow_rows = conn.execute(
+        "SELECT media_id, backend, text, boxes_json, scores_json FROM ocr_shadow ORDER BY media_id"
+    ).fetchall()
+    assert [(row["media_id"], row["backend"], row["text"]) for row in shadow_rows] == [
+        (corpus_media_id, "ppocrv5-eslav", "shadow corpus"),
+        (empty_media_id, "ppocrv5-eslav", "shadow empty"),
+    ]
+    assert shadow_rows[0]["boxes_json"] == "[[[0, 0]]]"
+    assert shadow_rows[0]["scores_json"] == "[0.9]"
+    db.close()
+
+
+def test_character_error_rate_uses_normalized_plain_levenshtein():
+    from app.shadow_ocr import character_error_rate
+
+    assert character_error_rate("Пятница!", "пятница") == 0.0
+    assert character_error_rate("abc", "axc") == 1 / 3

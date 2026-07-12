@@ -21,6 +21,7 @@ class Artifact:
     files: tuple[str, ...] = ()
     notes: str = ""
     revision: str | None = None
+    components: tuple[tuple[str, str], ...] = ()
 
 
 ARTIFACTS: tuple[Artifact, ...] = (
@@ -70,6 +71,19 @@ ARTIFACTS: tuple[Artifact, ...] = (
         size="~1.43 GB including mmproj",
         license="see model card",
         notes="Heavy rescue/all-frames OCR; never a default.",
+    ),
+    Artifact(
+        key="ocr:ppocrv5-eslav",
+        capability="ocr",
+        label="PP-OCRv5 mobile detector + East Slavic recognizer",
+        source="PaddlePaddle PP-OCRv5 mobile models",
+        size="~12 MB",
+        license="Apache-2.0",
+        notes="Separate Python <=3.12 PaddleOCR shadow worker; never replaces production OCR.",
+        components=(
+            ("PaddlePaddle/PP-OCRv5_mobile_det", "det"),
+            ("PaddlePaddle/eslav_PP-OCRv5_mobile_rec", "rec"),
+        ),
     ),
     Artifact(
         key="vlm:internvl2.5-1b-q8",
@@ -135,6 +149,11 @@ def resolve_local_path(source: str, configured_path: str | Path | None = None) -
 def artifact_ready(artifact: Artifact, configured_path: str | Path | None = None) -> bool:
     if artifact.capability in {"ocr"} and artifact.key in {"ocr:easyocr", "ocr:rapidocr"}:
         return False  # dependency-specific checks live in the backend, never download here
+    if artifact.components:
+        if not configured_path:
+            return False
+        path = Path(configured_path).expanduser()
+        return path.is_dir() and all((path / directory).is_dir() for _, directory in artifact.components)
     path = resolve_local_path(artifact.source, configured_path)
     if path is None:
         return False

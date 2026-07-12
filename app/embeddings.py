@@ -383,3 +383,10 @@ def get_shared_embedder() -> Embedder:
         if _shared is None:
             _shared = Embedder()
     return _shared
+
+
+def unload_shared_embedder() -> bool:
+    """Unload the shared image embedder without constructing it just to unload it."""
+    with _shared_lock:
+        embedder = _shared
+    return embedder.unload() if embedder is not None else False

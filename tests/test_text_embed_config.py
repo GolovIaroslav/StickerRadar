@@ -61,3 +61,34 @@ def test_env_example_contains_all_text_embed_keys():
         "TEXT_EMBED_QUERY_PREFIX",
     ):
         assert f"{key}=" in text
+
+
+def test_ppocr_shadow_artifact_installs_both_local_model_folders(monkeypatch, tmp_path, capsys):
+    from app import config, model_installer
+
+    monkeypatch.setattr(config, "MODEL_ROOT", tmp_path)
+    monkeypatch.setattr(config, "OCR_SHADOW_DET_DIR", "")
+    monkeypatch.setattr(config, "OCR_SHADOW_REC_DIR", "")
+    monkeypatch.setattr(model_installer, "artifact_ready", lambda *_args: False)
+    monkeypatch.setattr(model_installer.shutil, "which", lambda name: "/usr/bin/hf" if name == "hf" else None)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(model_installer.subprocess, "run", lambda command, check: commands.append(command))
+
+    assert model_installer.install_artifact("ocr:ppocrv5-eslav", yes=True) == 0
+
+    target = tmp_path / "ocr-ppocrv5-eslav"
+    assert commands == [
+        ["hf", "download", "PaddlePaddle/PP-OCRv5_mobile_det", "--local-dir", str(target / "det")],
+        ["hf", "download", "PaddlePaddle/eslav_PP-OCRv5_mobile_rec", "--local-dir", str(target / "rec")],
+    ]
+    output = capsys.readouterr().out
+    assert f"OCR_SHADOW_DET_DIR={target / 'det'}" in output
+    assert f"OCR_SHADOW_REC_DIR={target / 'rec'}" in output
+
+
+def test_env_example_contains_all_ppocr_shadow_keys():
+    env_example = Path(__file__).parents[1] / ".env.example"
+    text = env_example.read_text(encoding="utf-8")
+
+    for key in ("OCR_SHADOW_ENABLED", "OCR_SHADOW_PYTHON", "OCR_SHADOW_DET_DIR", "OCR_SHADOW_REC_DIR"):
+        assert f"{key}=" in text

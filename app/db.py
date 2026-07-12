@@ -89,12 +89,13 @@ CREATE TABLE IF NOT EXISTS frame_embeddings (
 );
 
 CREATE TABLE IF NOT EXISTS media_text_embeddings (
-  media_id    INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
+  media_id    INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
   model_name  TEXT NOT NULL,
   dim         INTEGER NOT NULL,
   vector      BLOB NOT NULL,
   source_text TEXT,
-  created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+  created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (media_id, model_name)
 );
 
 CREATE TABLE IF NOT EXISTS app_state (
@@ -155,6 +156,20 @@ CREATE TABLE IF NOT EXISTS frame_ocr (
   pipeline_version TEXT,
   generated_at TEXT
 );
+
+-- Experimental OCR output. This table is deliberately isolated from
+-- media_items.ocr_text until a human explicitly decides to promote a backend.
+CREATE TABLE IF NOT EXISTS ocr_shadow (
+  media_id    INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+  backend     TEXT NOT NULL,
+  text        TEXT NOT NULL DEFAULT '',
+  boxes_json  TEXT NOT NULL DEFAULT '[]',
+  scores_json TEXT NOT NULL DEFAULT '[]',
+  created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (media_id, backend)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ocr_shadow_backend ON ocr_shadow(backend);
 
 -- Separate FTS5 for OCR text — kept separate from media_fts so no migration
 -- of the existing metadata index is needed when adding this feature.
@@ -228,6 +243,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
           generated_at TEXT
         )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS ocr_shadow (
+          media_id    INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+          backend     TEXT NOT NULL,
+          text        TEXT NOT NULL DEFAULT '',
+          boxes_json  TEXT NOT NULL DEFAULT '[]',
+          scores_json TEXT NOT NULL DEFAULT '[]',
+          created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (media_id, backend)
+        )"""
+    )
     frame_ocr_cols = {r[1] for r in conn.execute("PRAGMA table_info(frame_ocr)")}
     if "backend" not in frame_ocr_cols:
         conn.execute("ALTER TABLE frame_ocr ADD COLUMN backend TEXT")
@@ -242,16 +268,42 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE frame_ocr ADD COLUMN generated_at TEXT")
         changed = True
 
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS media_text_embeddings (
-          media_id    INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
-          model_name  TEXT NOT NULL,
-          dim         INTEGER NOT NULL,
-          vector      BLOB NOT NULL,
-          source_text TEXT,
-          created_at  TEXT DEFAULT CURRENT_TIMESTAMP
-        )"""
-    )
+    text_table = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='media_text_embeddings'"
+    ).fetchone()
+    if text_table is not None and "PRIMARY KEY (media_id, model_name)" not in (text_table[0] or ""):
+        conn.execute(
+            """CREATE TABLE media_text_embeddings_new (
+              media_id    INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+              model_name  TEXT NOT NULL,
+              dim         INTEGER NOT NULL,
+              vector      BLOB NOT NULL,
+              source_text TEXT,
+              created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (media_id, model_name)
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO media_text_embeddings_new
+               (media_id, model_name, dim, vector, source_text, created_at)
+               SELECT media_id, model_name, dim, vector, source_text, created_at
+               FROM media_text_embeddings"""
+        )
+        conn.execute("DROP TABLE media_text_embeddings")
+        conn.execute("ALTER TABLE media_text_embeddings_new RENAME TO media_text_embeddings")
+        changed = True
+    else:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS media_text_embeddings (
+              media_id    INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+              model_name  TEXT NOT NULL,
+              dim         INTEGER NOT NULL,
+              vector      BLOB NOT NULL,
+              source_text TEXT,
+              created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (media_id, model_name)
+            )"""
+        )
     if changed:
         conn.commit()
 
@@ -515,7 +567,7 @@ def upsert_media_text_embedding(
         """
         INSERT INTO media_text_embeddings (media_id, model_name, dim, vector, source_text)
         VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(media_id) DO UPDATE SET
+        ON CONFLICT(media_id, model_name) DO UPDATE SET
             model_name=excluded.model_name,
             dim=excluded.dim,
             vector=excluded.vector,
@@ -523,6 +575,31 @@ def upsert_media_text_embedding(
             created_at=CURRENT_TIMESTAMP
         """,
         (media_id, model_name, dim, vector_bytes, source_text),
+    )
+    conn.commit()
+
+
+def upsert_ocr_shadow(
+    *,
+    media_id: int,
+    backend: str,
+    text: str,
+    boxes_json: str,
+    scores_json: str,
+) -> None:
+    """Persist an experimental OCR result without mutating canonical OCR fields."""
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO ocr_shadow (media_id, backend, text, boxes_json, scores_json)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(media_id, backend) DO UPDATE SET
+            text=excluded.text,
+            boxes_json=excluded.boxes_json,
+            scores_json=excluded.scores_json,
+            created_at=CURRENT_TIMESTAMP
+        """,
+        (media_id, backend, text, boxes_json, scores_json),
     )
     conn.commit()
 
@@ -631,14 +708,45 @@ def list_media_missing_text_embeddings(model_name: str, limit: int = 100) -> lis
         FROM media_items mi
         LEFT JOIN media_text_embeddings mte
           ON mte.media_id = mi.id AND mte.model_name = ?
-        WHERE mi.ocr_status='ok'
-          AND COALESCE(mi.ocr_text, '') <> ''
+        WHERE COALESCE(TRIM(mi.ocr_text), '') <> ''
           AND (mte.media_id IS NULL OR COALESCE(mte.source_text, '') <> COALESCE(mi.ocr_text, ''))
         ORDER BY mi.id
         LIMIT ?
         """,
         (model_name, limit),
     ).fetchall()
+
+
+def list_media_for_ocr_shadow(media_ids: list[int]) -> list[sqlite3.Row]:
+    """Return one usable image path candidate per requested media item."""
+    if not media_ids:
+        return []
+    placeholders = ",".join("?" for _ in media_ids)
+    return get_conn().execute(
+        f"""
+        SELECT mi.id, mi.local_path, mi.ocr_text, mi.ocr_status,
+               mf.preview_path
+        FROM media_items mi
+        LEFT JOIN media_frames mf
+          ON mf.media_id = mi.id
+         AND mf.frame_index = (
+            SELECT MIN(frame_index) FROM media_frames WHERE media_id = mi.id
+         )
+        WHERE mi.id IN ({placeholders})
+        """,
+        media_ids,
+    ).fetchall()
+
+
+def list_empty_ocr_media_ids() -> list[int]:
+    rows = get_conn().execute(
+        """
+        SELECT id FROM media_items
+        WHERE ocr_status='ok' AND COALESCE(TRIM(ocr_text), '') = ''
+        ORDER BY id
+        """
+    ).fetchall()
+    return [int(row["id"]) for row in rows]
 
 
 def list_prunable_media() -> list[sqlite3.Row]:

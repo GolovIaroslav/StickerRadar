@@ -275,6 +275,50 @@ def _run_ocr_text_embed(limit: int | None) -> None:
     print(f"OCR-text embedding complete: ok={done}, failed={failed}")
 
 
+def _run_text_embed_backfill(limit: int | None) -> None:
+    """Embed persisted OCR text with the optional dedicated text branch."""
+    config.ensure_dirs()
+    db.get_conn()
+
+    if not config.TEXT_EMBED_ENABLED:
+        print("Text embedding branch is disabled (set TEXT_EMBED_ENABLED=true).")
+        return
+
+    from app.text_embed import get_shared_text_embedder
+
+    embedder = get_shared_text_embedder()
+    model_name = embedder.model_id()
+    rows = db.list_media_missing_text_embeddings(model_name, limit if limit is not None else 10 ** 9)
+    total = len(rows)
+    if not total:
+        print(f"No pending text-embedding backfill for {model_name}.")
+        return
+
+    print(f"Backfilling OCR text with {model_name}: {total} items …")
+    done = 0
+    failed = 0
+    batch_size = 32
+    for start in range(0, total, batch_size):
+        batch = rows[start : start + batch_size]
+        texts = [(row["ocr_text"] or "").strip() for row in batch]
+        try:
+            vectors = embedder.embed_texts(texts, is_query=False)
+            for row, text, vector in zip(batch, texts, vectors, strict=True):
+                db.upsert_media_text_embedding(
+                    media_id=row["id"],
+                    model_name=model_name,
+                    dim=len(vector),
+                    vector_bytes=vector.tobytes(),
+                    source_text=text,
+                )
+            done += len(batch)
+        except Exception as exc:
+            failed += len(batch)
+            print(f"  Text-embedding batch failed ({start + 1}-{start + len(batch)}): {exc}")
+        print(f"  Text-embed backfill {min(start + len(batch), total)}/{total} …")
+    print(f"Text-embedding backfill complete: ok={done}, failed={failed}")
+
+
 def _run_embed(limit: int | None, keep_previews: bool = False) -> None:
     config.ensure_dirs()
     db.get_conn()

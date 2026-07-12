@@ -5,6 +5,7 @@ Usage:
     python -m app login   [--method qr|phone] [--profile NAME]
     python -m app ocr-models
     python -m app ocr-benchmark --backend easyocr|rapidocr|glm-ocr [--limit N] [--seed N] [--cpu]
+    python -m app ocr-shadow [--limit N] [--only-empty]
     python -m app retrieval-benchmark --model MODEL_NAME [--device auto|cpu|cuda] [--sample-size N] [--seed N]
     python -m app sync    [--metadata|--download|--preview|--embed]
                           [--reindex] [--full-reindex] [--frames N] [--limit N]
@@ -203,7 +204,15 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if getattr(args, "frames", None):
         config.FRAME_COUNT = args.frames
 
-    from app.scanner import _run_metadata_sync, _run_download, _run_preview, _run_ocr, _run_embed, _run_ocr_text_embed
+    from app.scanner import (
+        _run_download,
+        _run_embed,
+        _run_metadata_sync,
+        _run_ocr,
+        _run_ocr_text_embed,
+        _run_preview,
+        _run_text_embed_backfill,
+    )
 
     keep_previews = getattr(args, "keep_previews", False)
     limit = getattr(args, "limit", None)
@@ -214,6 +223,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         getattr(args, "ocr", False),
         getattr(args, "embed", False),
         getattr(args, "ocr_text_embed", False),
+        getattr(args, "text_embed_backfill", False),
         getattr(args, "reocr", False),
     ])
 
@@ -238,6 +248,9 @@ def cmd_sync(args: argparse.Namespace) -> None:
     run_ocr_stage = (run_all and config.OCR_ENABLED) or getattr(args, "ocr", False) or getattr(args, "reocr", False)
     run_embed_stage = run_all or getattr(args, "embed", False) or getattr(args, "reocr", False)
     run_ocr_text_embed_stage = run_all or getattr(args, "ocr_text_embed", False)
+    run_text_embed_backfill_stage = getattr(args, "text_embed_backfill", False) or (
+        config.TEXT_EMBED_ENABLED and (run_all or getattr(args, "embed", False))
+    )
 
     try:
         if run_all or getattr(args, "metadata", False):
@@ -273,6 +286,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 _run_embed(limit, keep_previews=keep_previews)
             if run_ocr_text_embed_stage:
                 _run_ocr_text_embed(limit)
+            if run_text_embed_backfill_stage:
+                _run_text_embed_backfill(limit)
 
         if run_all:
             _print_stats(config, db, getattr(args, "profile", None) or _read_active_profile())
@@ -582,6 +597,16 @@ def cmd_ocr_models(_args: argparse.Namespace) -> None:
         print(f"  {line}")
 
 
+def cmd_ocr_shadow(args: argparse.Namespace) -> None:
+    from app.errors import ModelNotInstalled
+    from app.shadow_ocr import run_shadow_ocr
+
+    try:
+        run_shadow_ocr(limit=args.limit, only_empty=args.only_empty)
+    except ModelNotInstalled as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def cmd_retrieval_benchmark(args: argparse.Namespace) -> None:
     from app.retrieval_benchmark import run_benchmark
     import json
@@ -635,6 +660,8 @@ def main() -> None:
     p.add_argument("--embed", action="store_true", help="Embed stage only")
     p.add_argument("--ocr-text-embed", action="store_true", dest="ocr_text_embed",
                    help="Backfill semantic OCR-text embeddings from persisted ocr_text")
+    p.add_argument("--text-embed-backfill", action="store_true", dest="text_embed_backfill",
+                   help="Backfill persisted OCR text with the optional dedicated text model")
     p.add_argument("--reindex", action="store_true",
                    help="Re-extract previews and re-embed everything (after changing FRAME_COUNT)")
     p.add_argument("--reocr", action="store_true",
@@ -687,6 +714,13 @@ def main() -> None:
     p.add_argument("--cpu", action="store_true", help="Force CPU mode where supported")
     p.add_argument("--llm-repo", default="ggml-org/GLM-OCR-GGUF:Q8_0", help="GGUF repo for glm-ocr")
 
+    # ocr-shadow
+    p = sub.add_parser("ocr-shadow", help="Measure local PP-OCRv5 without changing production OCR text")
+    p.add_argument("--limit", type=int, default=40, metavar="N",
+                   help="Total items: corpus cases first, then a seeded empty-text sample (default: 40)")
+    p.add_argument("--only-empty", action="store_true",
+                   help="Skip corpus cases and sample only stickers whose current OCR text is empty")
+
     # retrieval-benchmark
     p = sub.add_parser("retrieval-benchmark", help="Benchmark retrieval quality for one embedding model on real stickers")
     p.add_argument("--model", required=True, help="Embedding model key or custom model id/path")
@@ -730,6 +764,7 @@ def main() -> None:
         "models": cmd_models,
         "ocr-models": cmd_ocr_models,
         "ocr-benchmark": cmd_ocr_benchmark,
+        "ocr-shadow": cmd_ocr_shadow,
         "retrieval-benchmark": cmd_retrieval_benchmark,
         "session": cmd_session,
         "search": cmd_search,

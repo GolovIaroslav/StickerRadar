@@ -21,12 +21,18 @@ import numpy as np
 
 from app import config, db
 from app.embeddings import Embedder
+from app.errors import EmbedError, ModelNotInstalled
 from app.ocr import normalize_text as _ocr_normalize
 
 
 def _get_embedder() -> Embedder:
     from app.embeddings import get_shared_embedder
     return get_shared_embedder()
+
+
+def _get_text_embedder():
+    from app.text_embed import get_shared_text_embedder
+    return get_shared_text_embedder()
 
 
 @dataclass
@@ -371,27 +377,48 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
     embedder = _get_embedder()
     query_vec = embedder.embed_text(query)
 
-    cache = _load(embedder.model_name)
-    if not cache.media_ids and not cache.text_media_ids:
+    image_cache = _load(embedder.model_name)
+    text_cache = image_cache
+    text_query_vec = query_vec
+    if config.TEXT_EMBED_ENABLED:
+        try:
+            text_embedder = _get_text_embedder()
+            dedicated_cache = _load(text_embedder.model_id())
+            if dedicated_cache is not image_cache and dedicated_cache.text_media_ids:
+                dedicated_query = text_embedder.embed_text(query, is_query=True)
+                if (
+                    dedicated_cache.text_vecs.ndim == 2
+                    and dedicated_cache.text_vecs.shape[1] == dedicated_query.shape[0]
+                ):
+                    text_query_vec = dedicated_query
+                    text_cache = dedicated_cache
+        except (EmbedError, ModelNotInstalled):
+            # The dedicated branch is opt-in and must not make the existing
+            # SigLIP2 search unavailable when its local server is down.
+            pass
+
+    if not image_cache.media_ids and not text_cache.text_media_ids:
         return []
 
     image_best: dict[int, float] = {}
-    if cache.media_ids:
-        image_scores = cache.vecs @ query_vec
-        for media_id, score in zip(cache.media_ids, image_scores.tolist()):
+    if image_cache.media_ids:
+        image_scores = image_cache.vecs @ query_vec
+        for media_id, score in zip(image_cache.media_ids, image_scores.tolist()):
             if media_id not in image_best or score > image_best[media_id]:
                 image_best[media_id] = score
 
     text_best: dict[int, float] = {}
-    if cache.text_media_ids:
-        text_scores = cache.text_vecs @ query_vec
-        for media_id, score in zip(cache.text_media_ids, text_scores.tolist()):
+    if text_cache.text_media_ids:
+        text_scores = text_cache.text_vecs @ text_query_vec
+        for media_id, score in zip(text_cache.text_media_ids, text_scores.tolist()):
             if media_id not in text_best or score > text_best[media_id]:
                 text_best[media_id] = score
 
     candidate_ids = set(image_best) | set(text_best)
     if not candidate_ids:
         return []
+    metadata = dict(image_cache.meta)
+    metadata.update(text_cache.meta)
 
     vec_ranked = sorted(image_best, key=lambda mid: image_best[mid], reverse=True)
     ocr_sem_ranked = sorted(text_best, key=lambda mid: text_best[mid], reverse=True)
@@ -419,7 +446,7 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
     # letting generic image similarity decide a text query.
     ocr_lexical: dict[int, float] = {}
     for media_id in candidate_ids:
-        row = cache.meta.get(media_id)
+        row = metadata.get(media_id)
         if row is None:
             continue
         try:
@@ -498,7 +525,7 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
     query_lower = query.lower()
     results: list[SearchResult] = []
     for media_id, base in base_scores.items():
-        row = cache.meta.get(media_id)
+        row = metadata.get(media_id)
         if row is None:
             continue
         score = base
