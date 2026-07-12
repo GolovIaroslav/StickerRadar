@@ -67,8 +67,8 @@ def test_search_uses_semantic_ocr_text_leg_when_lexical_text_misses(monkeypatch)
 
     monkeypatch.setattr(search, '_get_embedder', lambda: FakeEmbedder())
     monkeypatch.setattr(search, '_load', lambda model_name: cache)
-    monkeypatch.setattr(search, '_fts_ranked_ids', lambda query, candidate_ids: [])
-    monkeypatch.setattr(search, '_ocr_fts_ranked_ids', lambda query, candidate_ids: [])
+    monkeypatch.setattr(search, '_fts_ranked_ids', lambda query, candidate_ids, **kwargs: [])
+    monkeypatch.setattr(search, '_ocr_fts_ranked_ids', lambda query, candidate_ids, **kwargs: [])
 
     results = search.search('я идиот', top_k=2)
 

@@ -79,7 +79,7 @@ def _load(model_name: str) -> _EmbedCache:
                mi.tg_document_id, mi.media_kind, mi.sticker_format,
                mi.local_path, mi.bot_file_id, mi.bot_send_method, mi.bot_cache_status,
                mi.set_short_name, mi.set_title, mi.emoji,
-               mi.is_favorite, mi.is_recent
+               mi.is_favorite, mi.is_recent, mi.ocr_text
         FROM frame_embeddings fe
         JOIN media_frames mf ON mf.id = fe.frame_id
         JOIN media_items mi  ON mi.id = mf.media_id
@@ -147,7 +147,7 @@ def _load(model_name: str) -> _EmbedCache:
                 """
                 SELECT id AS media_id, tg_document_id, media_kind, sticker_format,
                        local_path, bot_file_id, bot_send_method, bot_cache_status,
-                       set_short_name, set_title, emoji, is_favorite, is_recent
+                       set_short_name, set_title, emoji, is_favorite, is_recent, ocr_text
                 FROM media_items
                 WHERE id IN (%s)
                 """ % ",".join("?" for _ in text_media_ids),
@@ -168,19 +168,125 @@ def _load(model_name: str) -> _EmbedCache:
     return entry
 
 
-_FTS_SPECIAL = re.compile(r'["\'\+\-\*\(\)\:\^]')
+_FTS_SPECIAL = re.compile(r"[^\w\s]", re.UNICODE)
 
 
-def _fts_query_str(query: str) -> str | None:
+_OCR_LOOKALIKE = str.maketrans({
+    "a": "а", "c": "с", "e": "е", "o": "о", "p": "р", "x": "х",
+    "y": "у", "k": "к", "m": "м", "t": "т", "b": "в", "i": "і",
+})
+_OCR_SUFFIXES = (
+    "иями", "ами", "ями", "ого", "ему", "ому", "ыми", "ими", "ов", "ев",
+    "ам", "ям", "ах", "ях", "ой", "ый", "ий", "ая", "яя", "ое", "ее",
+    "ом", "ем", "у", "ю", "а", "я", "ы", "и", "е", "о", "ь",
+)
+
+
+_OCR_STATE_SYNONYMS = {
+    # Normalize common colloquial forms of a negative feeling before matching
+    # against OCR. This keeps the expansion narrow and avoids a dependency on
+    # a heavyweight query-rewrite model for ordinary Russian phrasing.
+    "хуево": "плохо",
+    "херово": "плохо",
+    "дерьмово": "плохо",
+    "паршиво": "плохо",
+}
+
+
+def _ocr_token_key(token: str) -> str:
+    key = token.lower().translate(_OCR_LOOKALIKE)
+    return _OCR_STATE_SYNONYMS.get(key, key)
+
+
+# Function words are useful for natural language but create broad, meaningless
+# fuzzy hits (for example, ``не`` in almost any OCR text). They must not alone
+# activate the direct OCR ranking leg.
+_OCR_STOPWORDS = {
+    "а", "без", "бы", "в", "во", "вы", "да", "для", "до", "его", "ее", "же",
+    "за", "и", "из", "их", "как", "ко", "к", "ли", "меня", "мне", "мы", "на",
+    "над", "не", "ни", "но", "о", "об", "он", "она", "они", "оно", "от", "по",
+    "под", "с", "себя", "со", "та", "те", "тебе", "то", "тот", "ты", "у", "эта",
+    "это", "эту", "черт", "что", "я",
+}
+
+
+def _ocr_tokens(text: str) -> list[str]:
+    normalized = _ocr_normalize(text)
+    return [
+        _ocr_token_key(token)
+        for token in normalized.split()
+        if token and _ocr_token_key(token) not in _OCR_STOPWORDS
+    ]
+
+
+def _ocr_stem(token: str) -> str:
+    for suffix in _OCR_SUFFIXES:
+        if len(token) - len(suffix) >= 4 and token.endswith(suffix):
+            return token[:-len(suffix)]
+    return token
+
+
+def ocr_text_match_score(query: str, ocr_text: str) -> float:
+    """Score useful OCR overlap, tolerant of inflection and common OCR lookalikes."""
+    from difflib import SequenceMatcher
+
+    query_tokens = [_ocr_stem(t) for t in _ocr_tokens(query)]
+    text_tokens = [_ocr_stem(t) for t in _ocr_tokens(ocr_text)]
+    if not query_tokens or not text_tokens:
+        return 0.0
+    matched: list[float] = []
+    for query_token in query_tokens:
+        best = 0.0
+        for text_token in text_tokens:
+            if query_token == text_token:
+                best = 1.0
+                break
+            if (
+                min(len(query_token), len(text_token)) >= 4
+                and (query_token in text_token or text_token in query_token)
+            ):
+                best = max(best, 0.82)
+            elif min(len(query_token), len(text_token)) >= 4:
+                ratio = SequenceMatcher(None, query_token, text_token).ratio()
+                if ratio >= 0.82:
+                    best = max(best, 0.55)
+        matched.append(best)
+    informative = [score for token, score in zip(query_tokens, matched) if len(token) >= 4]
+    if not informative:
+        informative = matched
+    coverage = sum(score >= 0.70 for score in informative) / len(informative)
+    quality = sum(informative) / len(informative)
+    phrase_bonus = 0.15 if _ocr_tokens(query) and " ".join(_ocr_tokens(query)) in " ".join(_ocr_tokens(ocr_text)) else 0.0
+    # Keep function words for this very specific adjacent-token recovery: OCR
+    # frequently turns the initial ``м`` in ``мне плохо`` into ``те плохо``.
+    # They are intentionally excluded from generic fuzzy scoring above.
+    state_query = " ".join(_ocr_token_key(t) for t in _ocr_normalize(query).split())
+    state_text = " ".join(_ocr_token_key(t) for t in _ocr_normalize(ocr_text).split())
+    state_bonus = 0.55 if "плох" in state_query and re.search(r"(?:мне|те)\s+плох", state_text) else 0.0
+    return min(1.0, 0.65 * coverage + 0.25 * quality + phrase_bonus + state_bonus)
+
+
+def _fts_query_str(query: str, *, operator: str = "OR") -> str | None:
     clean = _FTS_SPECIAL.sub(" ", query)
-    words = [w for w in clean.split() if w]
+    words = [
+        word
+        for word in clean.split()
+        if word and _ocr_token_key(word) not in _OCR_STOPWORDS
+    ]
     if not words:
         return None
-    return " ".join(f'"{w}"*' for w in words)
+    if operator not in {"AND", "OR"}:
+        raise ValueError(f"Unsupported FTS operator: {operator}")
+    return f" {operator} ".join(f'"{word}"*' for word in words)
 
 
-def _fts_ranked_ids(query: str, candidate_ids: set[int]) -> list[int]:
-    fts_q = _fts_query_str(query)
+def _fts_ranked_ids(
+    query: str,
+    candidate_ids: set[int],
+    *,
+    operator: str = "OR",
+) -> list[int]:
+    fts_q = _fts_query_str(query, operator=operator)
     if not fts_q:
         return []
     try:
@@ -193,9 +299,14 @@ def _fts_ranked_ids(query: str, candidate_ids: set[int]) -> list[int]:
         return []
 
 
-def _ocr_fts_ranked_ids(query: str, candidate_ids: set[int]) -> list[int]:
+def _ocr_fts_ranked_ids(
+    query: str,
+    candidate_ids: set[int],
+    *,
+    operator: str = "OR",
+) -> list[int]:
     norm_q = _ocr_normalize(query)
-    fts_q = _fts_query_str(norm_q)
+    fts_q = _fts_query_str(norm_q, operator=operator)
     if not fts_q:
         return []
     try:
@@ -285,11 +396,44 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
     vec_ranked = sorted(image_best, key=lambda mid: image_best[mid], reverse=True)
     ocr_sem_ranked = sorted(text_best, key=lambda mid: text_best[mid], reverse=True)
 
-    fts_ranked = _fts_ranked_ids(query, candidate_ids)
-    ocr_ranked = _ocr_fts_ranked_ids(query, candidate_ids)
+    # Multi-word AND FTS is a high-precision signal. Keep OR-only matches as a
+    # deliberately weak recall leg: a ubiquitous word must not suppress an
+    # otherwise strong visual semantic match.
+    fts_ranked = _fts_ranked_ids(query, candidate_ids, operator="AND")
+    ocr_ranked = _ocr_fts_ranked_ids(query, candidate_ids, operator="AND")
+    fts_ids = set(fts_ranked)
+    ocr_ids = set(ocr_ranked)
+    fts_or_ranked = [
+        media_id
+        for media_id in _fts_ranked_ids(query, candidate_ids, operator="OR")
+        if media_id not in fts_ids
+    ]
+    ocr_or_ranked = [
+        media_id
+        for media_id in _ocr_fts_ranked_ids(query, candidate_ids, operator="OR")
+        if media_id not in ocr_ids
+    ]
+
+    # FTS is intentionally strict and misses partial/garbled OCR. Keep a
+    # bounded fuzzy text leg over the already-loaded metadata instead of
+    # letting generic image similarity decide a text query.
+    ocr_lexical: dict[int, float] = {}
+    for media_id in candidate_ids:
+        row = cache.meta.get(media_id)
+        if row is None:
+            continue
+        try:
+            ocr_text = row["ocr_text"] or ""
+        except (KeyError, IndexError):
+            ocr_text = ""
+        if ocr_text:
+            score = ocr_text_match_score(query, ocr_text)
+            if score >= 0.20:
+                ocr_lexical[media_id] = score
 
     fts_w = 2.0 if len(query.split()) <= 3 else 1.0
     text_sem_w = 1.15 if len(query.split()) >= 2 else 1.0
+    weak_fts_w = 0.15
 
     semantic_lists: list[tuple[list[int], float]] = []
     if vec_ranked:
@@ -302,8 +446,24 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
         lexical_lists.append((fts_ranked, fts_w))
     if ocr_ranked:
         lexical_lists.append((ocr_ranked, fts_w))
+    if fts_or_ranked:
+        lexical_lists.append((fts_or_ranked, weak_fts_w))
+    if ocr_or_ranked:
+        lexical_lists.append((ocr_or_ranked, weak_fts_w))
 
-    if lexical_lists:
+    if ocr_lexical:
+        # Calibrated fusion: direct OCR evidence dominates weak visual noise.
+        max_ocr = max(ocr_lexical.values()) or 1.0
+        max_img = max(image_best.values()) if image_best else 0.0
+        min_img = min(image_best.values()) if image_best else 0.0
+        img_span = (max_img - min_img) or 1.0
+        base_scores = {}
+        for media_id in candidate_ids:
+            ocr_score = ocr_lexical.get(media_id, 0.0) / max_ocr
+            img_score = (image_best.get(media_id, min_img) - min_img) / img_span
+            text_score = text_best.get(media_id, -1.0)
+            base_scores[media_id] = 0.78 * ocr_score + 0.17 * img_score + 0.05 * max(text_score, 0.0)
+    elif lexical_lists:
         rrf = _rrf_fuse_weighted(semantic_lists + lexical_lists)
         vals = list(rrf.values())
         lo, span = min(vals), (max(vals) - min(vals)) or 1.0
@@ -327,9 +487,13 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
         ):
             return []
 
-        vals = list(semantic_base.values())
+        # Cosine scores from image and OCR-text embeddings are not calibrated to
+        # one another (their ranges differ by an order of magnitude here).
+        # Use their ranks for the final fusion instead of ``max(raw_score)``.
+        rrf = _rrf_fuse_weighted(semantic_lists)
+        vals = list(rrf.values())
         lo, span = min(vals), (max(vals) - min(vals)) or 1.0
-        base_scores = {mid: (semantic_base[mid] - lo) / span for mid in semantic_base}
+        base_scores = {mid: (rrf[mid] - lo) / span for mid in rrf}
 
     query_lower = query.lower()
     results: list[SearchResult] = []

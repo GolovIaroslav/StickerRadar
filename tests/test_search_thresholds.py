@@ -58,8 +58,8 @@ def test_search_returns_empty_on_low_confidence_semantic_only(monkeypatch):
 
     monkeypatch.setattr(search, '_get_embedder', lambda: FakeEmbedder())
     monkeypatch.setattr(search, '_load', lambda model_name: cache)
-    monkeypatch.setattr(search, '_fts_ranked_ids', lambda query, candidate_ids: [])
-    monkeypatch.setattr(search, '_ocr_fts_ranked_ids', lambda query, candidate_ids: [])
+    monkeypatch.setattr(search, '_fts_ranked_ids', lambda query, candidate_ids, **kwargs: [])
+    monkeypatch.setattr(search, '_ocr_fts_ranked_ids', lambda query, candidate_ids, **kwargs: [])
 
     results = search.search('совсем случайный бессмысленный запрос', top_k=5)
     assert results == []
@@ -123,8 +123,8 @@ def test_search_returns_empty_on_weak_short_semantic_only_text_query(monkeypatch
 
     monkeypatch.setattr(search, '_get_embedder', lambda: FakeEmbedder())
     monkeypatch.setattr(search, '_load', lambda model_name: cache)
-    monkeypatch.setattr(search, '_fts_ranked_ids', lambda query, candidate_ids: [])
-    monkeypatch.setattr(search, '_ocr_fts_ranked_ids', lambda query, candidate_ids: [])
+    monkeypatch.setattr(search, '_fts_ranked_ids', lambda query, candidate_ids, **kwargs: [])
+    monkeypatch.setattr(search, '_ocr_fts_ranked_ids', lambda query, candidate_ids, **kwargs: [])
 
     results = search.search('абракадабра ъуъ', top_k=5)
     assert results == []
@@ -188,8 +188,8 @@ def test_search_keeps_strong_short_semantic_only_text_query(monkeypatch):
 
     monkeypatch.setattr(search, '_get_embedder', lambda: FakeEmbedder())
     monkeypatch.setattr(search, '_load', lambda model_name: cache)
-    monkeypatch.setattr(search, '_fts_ranked_ids', lambda query, candidate_ids: [])
-    monkeypatch.setattr(search, '_ocr_fts_ranked_ids', lambda query, candidate_ids: [])
+    monkeypatch.setattr(search, '_fts_ranked_ids', lambda query, candidate_ids, **kwargs: [])
+    monkeypatch.setattr(search, '_ocr_fts_ranked_ids', lambda query, candidate_ids, **kwargs: [])
 
     results = search.search('я идиот', top_k=5)
     assert [r.media_id for r in results] == [1, 2]
