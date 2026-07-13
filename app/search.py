@@ -65,6 +65,11 @@ class _EmbedCache:
 
 _cache: dict[str, _EmbedCache] = {}
 
+# Calibrated on the frozen 20-case OCR corpus. Below this Qwen score, a query
+# has not established enough textual evidence to let OCR semantics outrank the
+# image search leg (for example, visual descriptions such as "blue hair").
+_DEDICATED_TEXT_MIN_CONFIDENCE = 0.45
+
 
 def invalidate_cache() -> None:
     _cache.clear()
@@ -431,6 +436,15 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
 
     vec_ranked = sorted(image_best, key=lambda mid: image_best[mid], reverse=True)
     ocr_sem_ranked = sorted(text_best, key=lambda mid: text_best[mid], reverse=True)
+    if (
+        dedicated_text_active
+        and text_best
+        and max(text_best.values()) < _DEDICATED_TEXT_MIN_CONFIDENCE
+    ):
+        # Image and OCR embeddings answer different kinds of queries. A weak
+        # Qwen match otherwise makes generic OCR words (for example, "crying")
+        # displace a visually relevant sticker from the top results.
+        ocr_sem_ranked = []
 
     # Multi-word AND FTS is a high-precision signal. Keep OR-only matches as a
     # deliberately weak recall leg: a ubiquitous word must not suppress an

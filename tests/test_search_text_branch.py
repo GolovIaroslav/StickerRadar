@@ -177,3 +177,53 @@ def test_dedicated_text_branch_does_not_apply_siglip_ocr_confidence_threshold(mo
     results = search.search("синие волосы", top_k=2)
 
     assert [result.media_id for result in results] == [1, 2]
+
+
+def test_low_confidence_dedicated_text_does_not_displace_visual_results(monkeypatch):
+    from app import config, search
+
+    class FakeImageEmbedder:
+        model_name = "siglip2"
+
+        def embed_text(self, _query):
+            return np.array([1.0, 0.0], dtype=np.float32)
+
+    class FakeTextEmbedder:
+        def model_id(self):
+            return "qwen3-embedding-0.6b-q8"
+
+        def embed_text(self, _query, *, is_query):
+            assert is_query is True
+            return np.array([1.0, 0.0], dtype=np.float32)
+
+    image_cache = search._EmbedCache(
+        count=2,
+        text_count=0,
+        media_ids=[1, 2],
+        vecs=np.array([[0.163, 0.0], [0.0, 0.0]], dtype=np.float32),
+        text_media_ids=[],
+        text_vecs=np.empty((0, 0), dtype=np.float32),
+        meta={1: _meta(1), 2: _meta(2)},
+    )
+    text_cache = search._EmbedCache(
+        count=0,
+        text_count=2,
+        media_ids=[],
+        vecs=np.empty((0, 0), dtype=np.float32),
+        # A weak Qwen match is allowed to help text lookup, but it is not
+        # enough evidence to replace a visual match with an unrelated OCR hit.
+        text_media_ids=[1, 2],
+        text_vecs=np.array([[0.20, 0.0], [0.424, 0.0]], dtype=np.float32),
+        meta={1: _meta(1), 2: _meta(2)},
+    )
+
+    monkeypatch.setattr(config, "TEXT_EMBED_ENABLED", True)
+    monkeypatch.setattr(search, "_get_embedder", lambda: FakeImageEmbedder())
+    monkeypatch.setattr(search, "_get_text_embedder", lambda: FakeTextEmbedder())
+    monkeypatch.setattr(search, "_load", lambda name: image_cache if name == "siglip2" else text_cache)
+    monkeypatch.setattr(search, "_fts_ranked_ids", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(search, "_ocr_fts_ranked_ids", lambda *_args, **_kwargs: [])
+
+    results = search.search("аниме девочка синие волосы плачет", top_k=2)
+
+    assert [result.media_id for result in results] == [1, 2]
