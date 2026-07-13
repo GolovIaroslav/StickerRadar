@@ -347,6 +347,7 @@ def _semantic_only_should_return_empty(
     second_sem: float,
     best_image_sem: float,
     best_text_sem: float,
+    dedicated_text_active: bool = False,
 ) -> bool:
     token_count = len([t for t in re.split(r"\s+", query.strip()) if t])
 
@@ -354,6 +355,13 @@ def _semantic_only_should_return_empty(
         return True
     if best_sem < 0.24 and (best_sem - second_sem) < 0.015:
         return True
+
+    if dedicated_text_active:
+        # The thresholds below were calibrated against the old SigLIP OCR-text
+        # vectors. Qwen's cosine range is materially lower, so applying (for
+        # example) the 0.82 floor to it rejects valid image-semantic matches.
+        # Keep only the model-agnostic low-confidence checks above.
+        return False
 
     if not _is_text_like_query(query):
         return False
@@ -525,6 +533,7 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
             second_sem=second_sem,
             best_image_sem=best_image_sem,
             best_text_sem=best_text_sem,
+            dedicated_text_active=dedicated_text_active,
         ):
             return []
 
