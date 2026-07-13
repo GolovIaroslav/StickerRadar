@@ -1,7 +1,7 @@
 """Explicit model installation commands.
 
 Nothing in this module is imported by runtime model loaders. Installation is an
-intentional, user-visible side effect and requires --yes.
+intentional, user-visible side effect reached only through the explicit CLI.
 """
 from __future__ import annotations
 

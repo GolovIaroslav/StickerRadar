@@ -20,7 +20,7 @@ from app.ocr import normalize_text
 _BACKEND = "ppocrv5-eslav"
 _CORPUS_PATH = config.PROJECT_ROOT / "research" / "diagnostics" / "text_sticker_corpus_v1.json"
 _WORKER_PATH = config.PROJECT_ROOT / "scripts" / "ppocr_worker.py"
-_IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+_IMAGE_SUFFIXES = {".bmp", ".gif", ".jpeg", ".jpg", ".mp4", ".png", ".webm", ".webp"}
 
 
 @dataclass(frozen=True)
@@ -39,12 +39,10 @@ def _worker_python() -> str:
             "OCR_SHADOW_PYTHON is not set. Create a Python <=3.12 PaddleOCR venv and set it."
         )
     path = Path(raw).expanduser()
-    resolved = str(path.resolve()) if path.is_file() else shutil.which(raw)
+    # Keep the venv executable path itself: resolving it follows the usual
+    # ``venv/bin/python -> base-python`` symlink and loses the venv prefix.
+    resolved = str(path.absolute()) if path.is_file() else shutil.which(raw)
     if resolved:
-        if Path(resolved).resolve() == Path(sys.executable).resolve():
-            raise ModelNotInstalled(
-                "OCR_SHADOW_PYTHON must point to a separate PaddleOCR virtual environment."
-            )
         return resolved
     raise ModelNotInstalled(f"OCR_SHADOW_PYTHON does not exist: {path}")
 
@@ -80,6 +78,10 @@ def _validate_worker_runtime(worker_python: str) -> None:
         raise ModelNotInstalled("OCR_SHADOW_PYTHON must use Python 3.12 or lower for PaddleOCR.")
     if runtime.get("prefix") == runtime.get("base_prefix"):
         raise ModelNotInstalled("OCR_SHADOW_PYTHON must be inside a separate virtual environment.")
+    if Path(str(runtime.get("prefix", ""))).absolute() == Path(sys.prefix).absolute():
+        raise ModelNotInstalled(
+            "OCR_SHADOW_PYTHON must point to a separate PaddleOCR virtual environment."
+        )
 
 
 def run_ppocr_worker(paths: list[Path]) -> list[ShadowOCRResult]:
@@ -170,11 +172,13 @@ def character_error_rate(ground_truth: str, hypothesis: str) -> float:
 
 
 def _image_path(row) -> Path | None:
+    preview = Path(row["preview_path"]) if row["preview_path"] else None
+    if preview and preview.is_file():
+        return preview.resolve()
     local = Path(row["local_path"]) if row["local_path"] else None
     if local and local.suffix.lower() in _IMAGE_SUFFIXES and local.is_file():
         return local.resolve()
-    preview = Path(row["preview_path"]) if row["preview_path"] else None
-    return preview.resolve() if preview and preview.is_file() else None
+    return None
 
 
 def _looks_plausible_text(text: str) -> bool:
@@ -184,7 +188,7 @@ def _looks_plausible_text(text: str) -> bool:
     return len(characters) >= 3 and any(char.isalnum() for char in characters)
 
 
-def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42) -> dict[str, int]:
+def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42) -> dict[str, int | float]:
     """Run PP-OCRv5 as a measurement-only batch and print its comparison report."""
     if limit < 1:
         raise ValueError("--limit must be at least 1")
@@ -248,6 +252,8 @@ def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42)
             print(f"  #{media_id} [{label}]: {result.text}" + (f"  [error: {result.error}]" if result.error else ""))
 
     corpus_reported = 0
+    current_cers: list[float] = []
+    shadow_cers: list[float] = []
     for media_id in corpus_ids:
         row = rows.get(media_id)
         case = corpus_by_id[media_id]
@@ -257,12 +263,22 @@ def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42)
         ground_truth = str(case["visual_text"])
         current_text = str(row["ocr_text"] or "")
         shadow_text = result.text
-        print(f"\n#{media_id} CER current={character_error_rate(ground_truth, current_text):.3f} "
-              f"shadow={character_error_rate(ground_truth, shadow_text):.3f}")
+        current_cer = character_error_rate(ground_truth, current_text)
+        shadow_cer = character_error_rate(ground_truth, shadow_text)
+        current_cers.append(current_cer)
+        shadow_cers.append(shadow_cer)
+        print(f"\n#{media_id} CER current={current_cer:.3f} shadow={shadow_cer:.3f}")
         print(f"  ground truth: {ground_truth}")
         print(f"  current OCR : {current_text}")
         print(f"  shadow OCR  : {shadow_text}" + (f"  [error: {result.error}]" if result.error else ""))
         corpus_reported += 1
+    mean_current_cer = sum(current_cers) / len(current_cers) if current_cers else 0.0
+    mean_shadow_cer = sum(shadow_cers) / len(shadow_cers) if shadow_cers else 0.0
+    if corpus_reported:
+        print(
+            f"\nCorpus mean CER: current={mean_current_cer:.3f} shadow={mean_shadow_cer:.3f} "
+            f"(cases={corpus_reported})"
+        )
 
     return {
         "processed": len(by_media),
@@ -271,4 +287,6 @@ def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42)
         "recovered": recovered,
         "plausibility_candidates": plausible,
         "corpus_reported": corpus_reported,
+        "mean_current_cer": mean_current_cer,
+        "mean_shadow_cer": mean_shadow_cer,
     }

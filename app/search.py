@@ -13,7 +13,6 @@ If lexical legs return no results the search falls back to semantic legs only.
 from __future__ import annotations
 
 import re
-import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
@@ -380,6 +379,7 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
     image_cache = _load(embedder.model_name)
     text_cache = image_cache
     text_query_vec = query_vec
+    dedicated_text_active = False
     if config.TEXT_EMBED_ENABLED:
         try:
             text_embedder = _get_text_embedder()
@@ -392,6 +392,7 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
                 ):
                     text_query_vec = dedicated_query
                     text_cache = dedicated_cache
+                    dedicated_text_active = True
         except (EmbedError, ModelNotInstalled):
             # The dedicated branch is opt-in and must not make the existing
             # SigLIP2 search unavailable when its local server is down.
@@ -459,7 +460,10 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
                 ocr_lexical[media_id] = score
 
     fts_w = 2.0 if len(query.split()) <= 3 else 1.0
-    text_sem_w = 1.15 if len(query.split()) >= 2 else 1.0
+    text_sem_w = (
+        2.0 if dedicated_text_active
+        else (1.15 if len(query.split()) >= 2 else 1.0)
+    )
     weak_fts_w = 0.15
 
     semantic_lists: list[tuple[list[int], float]] = []
@@ -479,17 +483,27 @@ def search(query: str, top_k: int | None = None) -> list[SearchResult]:
         lexical_lists.append((ocr_or_ranked, weak_fts_w))
 
     if ocr_lexical:
-        # Calibrated fusion: direct OCR evidence dominates weak visual noise.
+        # Qwen's dedicated text space is the strongest text signal. Preserve
+        # fuzzy OCR as corroboration, but do not let a partial lexical match
+        # erase a higher-quality semantic paraphrase/cross-lingual match.
         max_ocr = max(ocr_lexical.values()) or 1.0
         max_img = max(image_best.values()) if image_best else 0.0
         min_img = min(image_best.values()) if image_best else 0.0
         img_span = (max_img - min_img) or 1.0
+        max_text = max(text_best.values()) if text_best else 0.0
+        min_text = min(text_best.values()) if text_best else 0.0
+        text_span = (max_text - min_text) or 1.0
         base_scores = {}
         for media_id in candidate_ids:
             ocr_score = ocr_lexical.get(media_id, 0.0) / max_ocr
             img_score = (image_best.get(media_id, min_img) - min_img) / img_span
             text_score = text_best.get(media_id, -1.0)
-            base_scores[media_id] = 0.78 * ocr_score + 0.17 * img_score + 0.05 * max(text_score, 0.0)
+            if dedicated_text_active:
+                text_score = (text_score - min_text) / text_span
+                base_scores[media_id] = 0.60 * text_score + 0.30 * ocr_score + 0.10 * img_score
+            else:
+                # Calibrated fusion: direct OCR evidence dominates weak visual noise.
+                base_scores[media_id] = 0.78 * ocr_score + 0.17 * img_score + 0.05 * max(text_score, 0.0)
     elif lexical_lists:
         rrf = _rrf_fuse_weighted(semantic_lists + lexical_lists)
         vals = list(rrf.values())

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import sys
+
+import pytest
+
 
 def _add_media(db, conn, tmp_path, document_id: str, ocr_text: str) -> tuple[int, object]:
     media_id = db.upsert_media_item(
@@ -58,6 +63,8 @@ def test_shadow_ocr_only_writes_its_own_table(monkeypatch, tmp_path):
         "recovered": 1,
         "plausibility_candidates": 1,
         "corpus_reported": 1,
+        "mean_current_cer": 1.0,
+        "mean_shadow_cer": 11 / 12,
     }
     canonical = conn.execute(
         "SELECT id, ocr_text FROM media_items ORDER BY id"
@@ -91,3 +98,36 @@ def test_shadow_plausibility_heuristic_rejects_punctuation_and_short_noise():
     assert _looks_plausible_text("пятница")
     assert not _looks_plausible_text("!!!")
     assert not _looks_plausible_text("ok")
+
+
+def test_shadow_ocr_uses_png_preview_for_webp_stickers(tmp_path):
+    from app.shadow_ocr import _image_path
+
+    source = tmp_path / "sticker.webp"
+    preview = tmp_path / "frame.png"
+    source.write_bytes(b"webp")
+    preview.write_bytes(b"png")
+
+    assert _image_path({"local_path": str(source), "preview_path": str(preview)}) == preview.resolve()
+
+
+def test_shadow_ocr_uses_video_when_no_preview_survives(tmp_path):
+    from app.shadow_ocr import _image_path
+
+    source = tmp_path / "sticker.webm"
+    source.write_bytes(b"video")
+
+    assert _image_path({"local_path": str(source), "preview_path": None}) == source.resolve()
+
+
+def test_shadow_worker_path_may_be_a_venv_python_symlink(monkeypatch, tmp_path):
+    from app import config, shadow_ocr
+
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks are unavailable")
+    worker = tmp_path / "venv" / "bin" / "python"
+    worker.parent.mkdir(parents=True)
+    os.symlink(sys.executable, worker)
+    monkeypatch.setattr(config, "OCR_SHADOW_PYTHON", str(worker))
+
+    assert shadow_ocr._worker_python() == str(worker.absolute())
