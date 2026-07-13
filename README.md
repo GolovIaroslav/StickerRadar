@@ -106,7 +106,7 @@ Optional: animated `.tgs` sticker support (may require native libs):
 
 ```bash
 uv add rlottie-python   # primary renderer
-# or: uv add lottie     # fallback renderer
+# or: uv add lottie cairosvg  # safe fallback renderer
 ```
 
 ---

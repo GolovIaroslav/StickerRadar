@@ -10,6 +10,7 @@ import random
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from app.ocr import normalize_text
 _BACKEND = "ppocrv5-eslav"
 _CORPUS_PATH = config.PROJECT_ROOT / "research" / "diagnostics" / "text_sticker_corpus_v1.json"
 _WORKER_PATH = config.PROJECT_ROOT / "scripts" / "ppocr_worker.py"
-_IMAGE_SUFFIXES = {".bmp", ".gif", ".jpeg", ".jpg", ".mp4", ".png", ".webm", ".webp"}
+_IMAGE_SUFFIXES = {".bmp", ".gif", ".jpeg", ".jpg", ".mp4", ".png", ".tgs", ".webm", ".webp"}
 
 
 @dataclass(frozen=True)
@@ -188,6 +189,19 @@ def _looks_plausible_text(text: str) -> bool:
     return len(characters) >= 3 and any(char.isalnum() for char in characters)
 
 
+def _render_tgs_frame(source: Path, destination: Path) -> Path:
+    """Render one local TGS frame for the separate OCR worker without DB writes."""
+    # rlottie-python's native renderer is unstable on the current Python 3.12
+    # build (SIGSEGV in librlottie), so shadow OCR uses the safe python-lottie
+    # SVG/Cairo renderer instead. This is isolated from the production preview
+    # pipeline and creates only a temporary raster frame.
+    from lottie.exporters.cairo import export_png
+    from lottie.parsers.tgs import parse_tgs
+
+    export_png(parse_tgs(str(source)), str(destination), frame=0)
+    return destination
+
+
 def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42) -> dict[str, int | float]:
     """Run PP-OCRv5 as a measurement-only batch and print its comparison report."""
     if limit < 1:
@@ -208,29 +222,37 @@ def run_shadow_ocr(*, limit: int = 40, only_empty: bool = False, seed: int = 42)
     selected_ids = corpus_ids + sample
 
     rows = {int(row["id"]): row for row in db.list_media_for_ocr_shadow(selected_ids)}
-    path_to_media: dict[Path, int] = {}
-    skipped = 0
-    for media_id in selected_ids:
-        row = rows.get(media_id)
-        image = _image_path(row) if row is not None else None
-        if image is None:
-            skipped += 1
-            print(f"  Skip {media_id}: no local image or preview frame")
-            continue
-        path_to_media[image] = media_id
+    with tempfile.TemporaryDirectory(prefix="stickerradar-shadow-") as temporary_dir:
+        path_to_media: dict[Path, int] = {}
+        skipped = 0
+        for media_id in selected_ids:
+            row = rows.get(media_id)
+            image = _image_path(row) if row is not None else None
+            if image is None:
+                skipped += 1
+                print(f"  Skip {media_id}: no local image or preview frame")
+                continue
+            if image.suffix.lower() == ".tgs":
+                try:
+                    image = _render_tgs_frame(image, Path(temporary_dir) / f"{media_id}.png")
+                except Exception as exc:
+                    skipped += 1
+                    print(f"  Skip {media_id}: could not render TGS frame ({exc})")
+                    continue
+            path_to_media[image] = media_id
 
-    results = run_ppocr_worker(list(path_to_media)) if path_to_media else []
-    by_media: dict[int, ShadowOCRResult] = {}
-    for result in results:
-        media_id = path_to_media[result.path]
-        by_media[media_id] = result
-        db.upsert_ocr_shadow(
-            media_id=media_id,
-            backend=_BACKEND,
-            text=result.text,
-            boxes_json=json.dumps(result.boxes, ensure_ascii=False),
-            scores_json=json.dumps(result.scores, ensure_ascii=False),
-        )
+        results = run_ppocr_worker(list(path_to_media)) if path_to_media else []
+        by_media: dict[int, ShadowOCRResult] = {}
+        for result in results:
+            media_id = path_to_media[result.path]
+            by_media[media_id] = result
+            db.upsert_ocr_shadow(
+                media_id=media_id,
+                backend=_BACKEND,
+                text=result.text,
+                boxes_json=json.dumps(result.boxes, ensure_ascii=False),
+                scores_json=json.dumps(result.scores, ensure_ascii=False),
+            )
 
     empty_selected = [
         media_id for media_id, row in rows.items()

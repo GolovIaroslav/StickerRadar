@@ -120,6 +120,15 @@ def test_shadow_ocr_uses_video_when_no_preview_survives(tmp_path):
     assert _image_path({"local_path": str(source), "preview_path": None}) == source.resolve()
 
 
+def test_shadow_ocr_keeps_tgs_source_when_no_preview_survives(tmp_path):
+    from app.shadow_ocr import _image_path
+
+    source = tmp_path / "sticker.tgs"
+    source.write_bytes(b"tgs")
+
+    assert _image_path({"local_path": str(source), "preview_path": None}) == source.resolve()
+
+
 def test_shadow_worker_path_may_be_a_venv_python_symlink(monkeypatch, tmp_path):
     from app import config, shadow_ocr
 
