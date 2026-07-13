@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 
 class _Message:
-    def __init__(self, user_id: int) -> None:
+    def __init__(self, user_id: int, text: str | None = None) -> None:
         self.from_user = SimpleNamespace(id=user_id)
+        self.chat = SimpleNamespace(id=123)
+        self.text = text
         self.answers: list[str] = []
 
     async def answer(self, text: str) -> None:
@@ -56,3 +58,21 @@ async def test_unload_command_releases_both_models_off_event_loop(monkeypatch):
     assert message.answers == [
         "🧹 Unloaded from RAM/VRAM: image embedding model, text embedding server."
     ]
+
+
+async def test_query_reports_no_results_instead_of_a_send_failure(monkeypatch):
+    from app import bot, config, db
+
+    monkeypatch.setattr(config, "OWNER_USER_ID", 10)
+    monkeypatch.setattr(db, "get_status_counts", lambda: {"embedded": 1})
+    monkeypatch.setattr(db, "count_embeddings_for_model", lambda _model: 1)
+
+    async def no_candidates(*_args, **_kwargs):
+        return 0, 0, False
+
+    monkeypatch.setattr(bot, "_send_query_page", no_candidates)
+    message = _Message(user_id=10, text="несуществующий запрос")
+
+    await bot.handle_query(message, SimpleNamespace())
+
+    assert message.answers == ["Не нашёл результатов в индексированной коллекции."]

@@ -427,6 +427,9 @@ async def handle_query(message: Message, bot: Bot) -> None:
         return
 
     if sent == 0:
+        if cursor == 0 and not has_more:
+            await message.answer("Не нашёл результатов в индексированной коллекции.")
+            return
         await message.answer("Found results but failed to send them.")
         return
     if has_more:
